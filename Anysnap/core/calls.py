@@ -11,8 +11,6 @@ from Anysnap import app, config, db, lang, logger, preload, queue, userbot, yt
 from Anysnap.helpers import Media, Track, buttons, thumb
 
 # Suppress pytgcalls harmless errors (library bugs - not critical)
-
-
 class PyTgCallsErrorFilter(logging.Filter):
     def filter(self, record):
         # Filter out UpdateGroupCall errors
@@ -149,22 +147,11 @@ class TgCall(PyTgCalls):
         seek_time: int = 0,
         message_chat_id: int = None,
     ) -> None:
-        """Play media in voice chat.
-
-        Args:
-            chat_id: Where to stream audio (could be channel in channel play mode)
-            message: Message to edit/delete (if any)
-            media: Media object to play
-            seek_time: Position to seek to (seconds)
-            message_chat_id: Where to send control messages (group chat in channel play mode)
-                           If None, messages go to same chat as audio (chat_id)
-        """
+        """Play media in voice chat."""
         client = await db.get_assistant(chat_id)
         _lang = await lang.get_lang(chat_id)
 
-        # Determine where messages should go:
-        # - If message_chat_id provided (channel play): send to group
-        # - Otherwise: send to same chat as audio
+        # Determine where messages should go
         target_chat_for_messages = message_chat_id if message_chat_id else chat_id
 
         # Generate thumbnail only if THUMB_GEN is enabled, otherwise use default
@@ -190,7 +177,6 @@ class TgCall(PyTgCalls):
                 return
             # For channels, verify assistant is member
             if chat.type == enums.ChatType.CHANNEL:
-                # Get the userbot (Pyrogram client) to access .me attribute
                 userbot_client = await db.get_client(chat_id)
                 if not userbot_client:
                     logger.error(f"No userbot client available for {chat_id}")
@@ -204,7 +190,6 @@ class TgCall(PyTgCalls):
                         logger.error(f"Assistant banned in channel {chat_id}")
                         if message:
                             await message.edit_text("❌ Assistant is banned in this channel.")
-                        # Disable channel play
                         await db.set_cmode(chat_id, None)
                         return
                 except errors.RPCError as e:
@@ -216,7 +201,6 @@ class TgCall(PyTgCalls):
                                 "❌ <b>Assistant not in channel!</b>\n\n"
                                 f"<blockquote>Please add @{userbot_client.me.username} to the channel as admin with voice chat permissions.</blockquote>"
                             )
-                        # Disable channel play
                         await db.set_cmode(chat_id, None)
                         return
         except errors.RPCError as e:
@@ -224,22 +208,13 @@ class TgCall(PyTgCalls):
                 logger.error(f"Invalid channel {chat_id}: {e}")
                 if message:
                     await message.edit_text("❌ Invalid channel. Disabling channel play.")
-                await db.set_cmode(chat_id, None)  # Disable channel play
+                await db.set_cmode(chat_id, None)
                 return
             raise
 
-        # Configure audio stream with optimized buffering for lag-free playback
-        # PERFORMANCE FIX: Increased buffers prevent stuttering/lagging during playback
         if seek_time > 1:
-            # Seeking: Still need buffers but skip to position first
             ffmpeg_params = f"-ss {seek_time} -probesize 10M -analyzeduration 5M -rtbufsize 5M -fflags +genpts+igndts"
         else:
-            # Normal playback with aggressive buffering:
-            # - probesize 10M: Large input buffer (prevents underruns)
-            # - analyzeduration 5M: Analyze more data (better format detection)
-            # - rtbufsize 5M: Real-time buffer (crucial for network streams)
-            # - fflags +genpts+igndts: Generate PTS, ignore DTS (smooth playback)
-            # - sync ext: External sync (reduces A/V desync)
             ffmpeg_params = "-probesize 10M -analyzeduration 5M -rtbufsize 5M -fflags +genpts+igndts -sync ext"
 
         is_video = getattr(media, "video", False)
@@ -316,12 +291,19 @@ class TgCall(PyTgCalls):
 
             if not seek_time:
                 await db.add_call(chat_id)
+                
+                # 🛠️ NEW OWNER VARIABLE LOGIC
+                # It fetches OWNER_NAME, if not available it defaults to BOT_NAME
+                owner_name = getattr(config, "OWNER_NAME", config.BOT_NAME)
+                
                 text = _lang["play_media"].format(
-                    media.url,
-                    media.title,
-                    media.duration,
-                    media.user,
+                    media.url,         # {0} - URL
+                    media.title,       # {1} - Title
+                    media.duration,    # {2} - Duration
+                    media.user,        # {3} - User
+                    owner_name,        # {4} - Owner Name for "Powered By"
                 )
+                
                 if not media.is_live and media.duration_sec:
                     import time as time_module
                     played = media.time
@@ -631,7 +613,6 @@ class TgCall(PyTgCalls):
                 try:
                     msg = await app.send_message(chat_id=target_chat, text=_lang["play_next"])
                 except errors.FloodWait as fw:
-                    # Do not block playback on UI flood waits; continue without message.
                     logger.warning(
                         f"FloodWait in play_next for {chat_id}: skipping status message ({fw.value}s)")
                     msg = None
