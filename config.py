@@ -6,7 +6,7 @@
 # Powered By   : Anysnap
 # Type         : API Based Telegram Music Bot
 #
-# Channel      : @MAGMAxRICH
+# Channel      : @ANYSNAP
 # GitHub       : https://github.com/themagmalord333-oss
 #
 # Unauthorized copying, modification, or redistribution
@@ -43,8 +43,9 @@ class Config:
 
         # Branding & Support Links (Dynamically loaded from .env)
         self.BOT_NAME: str = getenv("BOT_NAME", "Anysnap")
-        self.SUPPORT_CHANNEL: str = getenv("SUPPORT_CHANNEL", "https://t.me/MAGMAxRICH")
-        self.SUPPORT_CHAT: str = getenv("SUPPORT_CHAT", "https://t.me/MAGMAxRICH")
+        self.OWNER_NAME: str = getenv("OWNER_NAME", self.BOT_NAME)
+        self.SUPPORT_CHANNEL: str = getenv("SUPPORT_CHANNEL", "https://t.me/ANYSNAP")
+        self.SUPPORT_CHAT: str = getenv("SUPPORT_CHAT", "https://t.me/ANYSNAP")
         self.GITHUB_REPO: str = getenv("GITHUB_REPO", "https://github.com/themagmalord333-oss")
 
         # Excluded Chats
