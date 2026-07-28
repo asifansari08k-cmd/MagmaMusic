@@ -44,6 +44,7 @@ class Config:
         # Branding & Support Links (Dynamically loaded from .env)
         self.BOT_NAME: str = getenv("BOT_NAME", "Anysnap")
         self.OWNER_NAME: str = getenv("OWNER_NAME", self.BOT_NAME)
+        self.OWNER_LINK: str = getenv("OWNER_LINK", "https://t.me/ANYSNAP")
         self.SUPPORT_CHANNEL: str = getenv("SUPPORT_CHANNEL", "https://t.me/ANYSNAP")
         self.SUPPORT_CHAT: str = getenv("SUPPORT_CHAT", "https://t.me/ANYSNAP")
         self.GITHUB_REPO: str = getenv("GITHUB_REPO", "https://github.com/themagmalord333-oss")
