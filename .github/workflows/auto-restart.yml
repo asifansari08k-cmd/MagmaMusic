@@ -2,7 +2,8 @@ name: Auto Restart VC Music Bot
 
 on:
   workflow_run:
-    workflows: ["VC Music Bot Runner"]
+    workflows:
+      - "VC Music Bot Runner"
     types:
       - completed
 
@@ -24,11 +25,19 @@ jobs:
 
     steps:
       - name: Wait for Previous Run to Fully Close
-        run: sleep 20
+        run: |
+          echo "Previous VC Music Bot run completed."
+          echo "Waiting 30 seconds..."
+          sleep 30
 
-      - name: Start Next Bot Run
+      - name: Start Next VC Music Bot Run
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh workflow run "main.yml" \
+          echo "Starting next VC Music Bot run..."
+
+          gh workflow run "VC Music Bot Runner" \
+            --repo "${{ github.repository }}" \
             --ref "${{ github.event.repository.default_branch }}"
+
+          echo "Next VC Music Bot run started successfully."
