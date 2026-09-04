@@ -752,7 +752,7 @@ class MongoDB:
     ) -> None:
         await self.cache.update_one(
             {"_id": "sudoers"},
-            {"$pull": {"user_ids": user_id},
+            {"$pull": {"user_ids": user_id}},
         )
 
     async def get_sudoers(self) -> list[int]:
