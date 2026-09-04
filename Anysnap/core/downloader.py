@@ -18,13 +18,9 @@ DOWNLOAD_DIR = os.getenv("DOWNLOAD_DIR", "downloads")
 CACHE_EXPIRE_HOURS = float(os.getenv("CACHE_EXPIRE_HOURS", "24"))
 MAX_VIDEO_QUALITY = os.getenv("MAX_VIDEO_QUALITY", "720")
 
-# cookies.txt is in the project root
 COOKIES_FILE = os.getenv("COOKIES_FILE", "cookies.txt")
-
-# SQLite cache
 DB_FILE = os.getenv("DB_FILE", "cache.db")
 
-# Make sure download directory exists
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 
@@ -68,13 +64,7 @@ def get_cached_metadata(
     video_id: str,
     file_type: str,
 ) -> Optional[Dict[str, Any]]:
-    """
-    Return cached metadata only when:
-    - cache entry exists
-    - cache has not expired
-    - file exists
-    - file is not empty
-    """
+    """Return valid cached metadata."""
 
     try:
         with sqlite3.connect(DB_FILE, timeout=15.0) as conn:
@@ -109,11 +99,9 @@ def get_cached_metadata(
 
             if cache_age > cache_expire_seconds:
                 logger.info(
-                    f"🕒 Cache expired: {video_id} | "
-                    f"{file_type}"
+                    f"🕒 Cache expired: {video_id} | {file_type}"
                 )
 
-                # Remove expired database entry.
                 cur.execute(
                     "DELETE FROM downloads WHERE id = ?",
                     (row["id"],),
@@ -121,23 +109,17 @@ def get_cached_metadata(
 
                 conn.commit()
 
-                # Remove expired file if it still exists.
-                if (
-                    file_path
-                    and os.path.isfile(file_path)
-                ):
+                if file_path and os.path.isfile(file_path):
                     try:
                         os.remove(file_path)
 
                         logger.info(
-                            f"🗑️ Removed expired file: "
-                            f"{file_path}"
+                            f"🗑️ Removed expired file: {file_path}"
                         )
 
                     except OSError as e:
                         logger.warning(
-                            f"⚠️ Could not remove expired "
-                            f"file: {e}"
+                            f"⚠️ Could not remove expired file: {e}"
                         )
 
                 return None
@@ -153,7 +135,6 @@ def get_cached_metadata(
             ):
                 return dict(row)
 
-            # File no longer exists.
             logger.warning(
                 f"⚠️ Cached file missing or empty: "
                 f"{row['file_name']}"
@@ -225,9 +206,7 @@ def find_legacy_cached_file(
     video_id: str,
     ext: str,
 ) -> Optional[str]:
-    """
-    Find older downloaded files not present in SQLite.
-    """
+    """Find older downloaded files not present in SQLite."""
 
     if not video_id:
         return None
@@ -252,10 +231,6 @@ def find_legacy_cached_file(
 
     return None
 
-
-# =========================================================
-# DATABASE INITIALIZATION
-# =========================================================
 
 init_db()
 
@@ -318,6 +293,10 @@ def get_base_ydl_opts() -> Dict[str, Any]:
 
         "continuedl": True,
 
+        # Speed optimization
+        "concurrent_fragment_downloads": 32,
+        "http_chunk_size": 52428800,
+
         # YouTube JS challenge support
         "js_runtimes": {
             "node": {},
@@ -356,10 +335,7 @@ def extract_youtube_with_fallback(
     opts: Dict[str, Any],
     download: bool = True,
 ) -> Dict[str, Any]:
-    """
-    Try normal YouTube extraction first.
-    If it fails, retry using web_embedded.
-    """
+    """Try normal extraction, then web_embedded fallback."""
 
     strategies = [
         (
@@ -500,6 +476,7 @@ def download_audio_sync(url: str) -> str:
 
     opts.update(
         {
+            # Quality unchanged
             "format": (
                 "140/"
                 "ba[ext=m4a]/"
@@ -516,9 +493,9 @@ def download_audio_sync(url: str) -> str:
                 },
             ],
 
-            "concurrent_fragment_downloads": 15,
-
-            "http_chunk_size": 10485760,
+            # Speed
+            "concurrent_fragment_downloads": 32,
+            "http_chunk_size": 52428800,
 
             "nocheckcertificate": True,
 
@@ -688,6 +665,7 @@ def download_video_sync(url: str) -> str:
 
     opts.update(
         {
+            # Quality unchanged: max 720p
             "format": (
                 f"bv*[height<={MAX_VIDEO_QUALITY}]"
                 f"[ext=mp4]+"
@@ -701,9 +679,9 @@ def download_video_sync(url: str) -> str:
             "writethumbnail": False,
             "embedthumbnail": False,
 
-            "concurrent_fragment_downloads": 15,
-
-            "http_chunk_size": 10485760,
+            # Speed
+            "concurrent_fragment_downloads": 32,
+            "http_chunk_size": 52428800,
 
             "nocheckcertificate": True,
 
@@ -810,7 +788,7 @@ def download_video_sync(url: str) -> str:
 async def download_audio(
     url: str,
 ) -> Optional[str]:
-    """Async audio downloader. Returns local file path."""
+    """Async audio downloader."""
 
     try:
         return await asyncio.to_thread(
@@ -830,7 +808,7 @@ async def download_audio(
 async def download_video(
     url: str,
 ) -> Optional[str]:
-    """Async video downloader. Returns local file path."""
+    """Async video downloader."""
 
     try:
         return await asyncio.to_thread(
