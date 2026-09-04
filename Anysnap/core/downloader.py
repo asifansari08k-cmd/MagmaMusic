@@ -58,14 +58,24 @@ def init_db():
         logger.info("✅ Downloader SQLite cache initialized.")
 
     except Exception as e:
-        logger.error(f"❌ Database initialization failed: {e}")
+        logger.error(
+            f"❌ Database initialization failed: {e}",
+            exc_info=True,
+        )
 
 
 def get_cached_metadata(
     video_id: str,
     file_type: str,
 ) -> Optional[Dict[str, Any]]:
-    """Return cached metadata if the file still exists."""
+    """
+    Return cached metadata only when:
+    - cache entry exists
+    - cache has not expired
+    - file exists
+    - file is not empty
+    """
+
     try:
         with sqlite3.connect(DB_FILE, timeout=15.0) as conn:
             conn.row_factory = sqlite3.Row
@@ -88,15 +98,65 @@ def get_cached_metadata(
                 return None
 
             file_path = row["file_path"]
+            created_time = float(row["created_time"] or 0)
+
+            # -------------------------------------------------
+            # CACHE EXPIRY
+            # -------------------------------------------------
+
+            cache_age = time.time() - created_time
+            cache_expire_seconds = CACHE_EXPIRE_HOURS * 3600
+
+            if cache_age > cache_expire_seconds:
+                logger.info(
+                    f"🕒 Cache expired: {video_id} | "
+                    f"{file_type}"
+                )
+
+                # Remove expired database entry.
+                cur.execute(
+                    "DELETE FROM downloads WHERE id = ?",
+                    (row["id"],),
+                )
+
+                conn.commit()
+
+                # Remove expired file if it still exists.
+                if (
+                    file_path
+                    and os.path.isfile(file_path)
+                ):
+                    try:
+                        os.remove(file_path)
+
+                        logger.info(
+                            f"🗑️ Removed expired file: "
+                            f"{file_path}"
+                        )
+
+                    except OSError as e:
+                        logger.warning(
+                            f"⚠️ Could not remove expired "
+                            f"file: {e}"
+                        )
+
+                return None
+
+            # -------------------------------------------------
+            # FILE VALIDATION
+            # -------------------------------------------------
 
             if (
-                os.path.isfile(file_path)
+                file_path
+                and os.path.isfile(file_path)
                 and os.path.getsize(file_path) > 0
             ):
                 return dict(row)
 
+            # File no longer exists.
             logger.warning(
-                f"Cached file missing: {row['file_name']}"
+                f"⚠️ Cached file missing or empty: "
+                f"{row['file_name']}"
             )
 
             cur.execute(
@@ -108,7 +168,8 @@ def get_cached_metadata(
 
     except Exception as e:
         logger.error(
-            f"❌ Error accessing downloader cache: {e}"
+            f"❌ Error accessing downloader cache: {e}",
+            exc_info=True,
         )
 
     return None
@@ -119,6 +180,7 @@ def save_cached_metadata(
     file_type: str,
 ):
     """Save downloaded file metadata to SQLite."""
+
     try:
         with sqlite3.connect(DB_FILE, timeout=15.0) as conn:
             conn.execute(
@@ -154,7 +216,8 @@ def save_cached_metadata(
 
     except Exception as e:
         logger.error(
-            f"❌ Error saving downloader cache: {e}"
+            f"❌ Error saving downloader cache: {e}",
+            exc_info=True,
         )
 
 
@@ -162,7 +225,10 @@ def find_legacy_cached_file(
     video_id: str,
     ext: str,
 ) -> Optional[str]:
-    """Find older downloaded files not present in SQLite."""
+    """
+    Find older downloaded files not present in SQLite.
+    """
+
     if not video_id:
         return None
 
@@ -171,12 +237,17 @@ def find_legacy_cached_file(
     try:
         with os.scandir(DOWNLOAD_DIR) as entries:
             for entry in entries:
-                if entry.is_file() and entry.name.endswith(suffix):
+                if (
+                    entry.is_file()
+                    and entry.name.endswith(suffix)
+                    and os.path.getsize(entry.path) > 0
+                ):
                     return entry.name
 
     except Exception as e:
         logger.error(
-            f"❌ Error scanning {DOWNLOAD_DIR}: {e}"
+            f"❌ Error scanning {DOWNLOAD_DIR}: {e}",
+            exc_info=True,
         )
 
     return None
@@ -186,7 +257,6 @@ def find_legacy_cached_file(
 # DATABASE INITIALIZATION
 # =========================================================
 
-# Initialize when this module is imported.
 init_db()
 
 
@@ -196,6 +266,7 @@ init_db()
 
 def extract_video_id(url: str) -> Optional[str]:
     """Extract the 11-character YouTube video ID."""
+
     if not url:
         return None
 
@@ -245,7 +316,6 @@ def get_base_ydl_opts() -> Dict[str, Any]:
 
         "socket_timeout": 30,
 
-        # Resume interrupted downloads
         "continuedl": True,
 
         # YouTube JS challenge support
@@ -258,13 +328,17 @@ def get_base_ydl_opts() -> Dict[str, Any]:
         ],
     }
 
-    # Load cookies.txt if available
+    # -----------------------------------------------------
+    # COOKIES
+    # -----------------------------------------------------
+
     if os.path.isfile(COOKIES_FILE):
         opts["cookiefile"] = COOKIES_FILE
 
         logger.info(
             f"🍪 Loaded YouTube cookies: {COOKIES_FILE}"
         )
+
     else:
         logger.warning(
             f"⚠️ cookies.txt not found: {COOKIES_FILE}"
@@ -338,7 +412,7 @@ def extract_youtube_with_fallback(
             )
 
     raise RuntimeError(
-        f"All YouTube extraction strategies failed: "
+        "All YouTube extraction strategies failed: "
         f"{last_error}"
     )
 
@@ -347,9 +421,7 @@ def extract_youtube_with_fallback(
 # AUDIO DOWNLOAD
 # =========================================================
 
-def download_audio_sync(
-    url: str,
-) -> str:
+def download_audio_sync(url: str) -> str:
     """Download YouTube audio and return local file path."""
 
     video_id = extract_video_id(url)
@@ -477,7 +549,6 @@ def download_audio_sync(
             download=True,
         )
 
-        # Prepare final filename
         with yt_dlp.YoutubeDL(opts) as ydl:
             filename = ydl.prepare_filename(info)
 
@@ -538,9 +609,7 @@ def download_audio_sync(
 # VIDEO DOWNLOAD
 # =========================================================
 
-def download_video_sync(
-    url: str,
-) -> str:
+def download_video_sync(url: str) -> str:
     """Download YouTube video and return local file path."""
 
     video_id = extract_video_id(url)
@@ -741,11 +810,7 @@ def download_video_sync(
 async def download_audio(
     url: str,
 ) -> Optional[str]:
-    """
-    Async wrapper for audio downloader.
-
-    Returns local filesystem path.
-    """
+    """Async audio downloader. Returns local file path."""
 
     try:
         return await asyncio.to_thread(
@@ -755,7 +820,8 @@ async def download_audio(
 
     except Exception as e:
         logger.error(
-            f"❌ Async audio download failed: {e}"
+            f"❌ Async audio download failed: {e}",
+            exc_info=True,
         )
 
         return None
@@ -764,11 +830,7 @@ async def download_audio(
 async def download_video(
     url: str,
 ) -> Optional[str]:
-    """
-    Async wrapper for video downloader.
-
-    Returns local filesystem path.
-    """
+    """Async video downloader. Returns local file path."""
 
     try:
         return await asyncio.to_thread(
@@ -778,7 +840,8 @@ async def download_video(
 
     except Exception as e:
         logger.error(
-            f"❌ Async video download failed: {e}"
+            f"❌ Async video download failed: {e}",
+            exc_info=True,
         )
 
         return None
