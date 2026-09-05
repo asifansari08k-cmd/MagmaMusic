@@ -8,10 +8,12 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Delete old runs
+      - name: Delete old workflow runs
         env:
           GH_TOKEN: ${{ secrets.GH_PERSONAL_TOKEN }}
         run: |
+          echo "🔍 Starting cleanup..."
+
           gh api --paginate \
             "/repos/${{ github.repository }}/actions/workflows" \
             --jq '.workflows[] | select(.name == "VC Music Bot Runner") | .id' |
@@ -27,14 +29,20 @@ jobs:
                     and .status != "requested"
                     and .status != "pending"
                   )
-                | .id' |
-            while read run_id; do
+                | [.id, .status, .conclusion] | @tsv' |
+            while IFS=$'\t' read -r run_id status conclusion; do
 
-              gh api --method DELETE \
+              echo "🗑️ Deleting Run #$run_id | Status: $status | Result: $conclusion"
+
+              if gh api --method DELETE \
                 "/repos/${{ github.repository }}/actions/runs/$run_id" \
-                >/dev/null 2>&1 || true
+                >/dev/null 2>&1; then
+                echo "✅ Deleted Run #$run_id"
+              else
+                echo "❌ Failed to delete Run #$run_id"
+              fi
 
             done
           done
 
-          echo "Cleanup complete."
+          echo "🎉 Cleanup finished!"
