@@ -45,16 +45,13 @@ class YouTube:
         self,
         message_1: types.Message,
     ) -> Union[str, None]:
-
         """Extract YouTube URL from message."""
 
         messages = [message_1]
         link = None
 
         if message_1.reply_to_message:
-            messages.append(
-                message_1.reply_to_message
-            )
+            messages.append(message_1.reply_to_message)
 
         for message in messages:
 
@@ -72,12 +69,10 @@ class YouTube:
                         entity.type
                         == enums.MessageEntityType.URL
                     ):
-
                         link = text[
                             entity.offset:
                             entity.offset + entity.length
                         ]
-
                         break
 
             if message.caption_entities:
@@ -88,9 +83,7 @@ class YouTube:
                         entity.type
                         == enums.MessageEntityType.TEXT_LINK
                     ):
-
                         link = entity.url
-
                         break
 
         if link:
@@ -112,7 +105,6 @@ class YouTube:
         query: str,
         m_id: int,
     ) -> Track | None:
-
         """
         Normal YouTube search.
 
@@ -289,14 +281,17 @@ class YouTube:
         query: str,
         m_id: int = 0,
         limit: int = 5,
+        exclude_ids: set[str] | None = None,
     ) -> list[Track]:
-
         """
-        Search multiple YouTube results.
+        Search multiple YouTube results for autoplay.
 
-        Used ONLY by autoplay.
+        Duplicate video IDs are removed automatically.
 
-        Returns up to 5 different search results.
+        exclude_ids:
+            Video IDs that must NOT be returned.
+            This can contain the currently playing video
+            and recently played videos.
         """
 
         try:
@@ -305,6 +300,18 @@ class YouTube:
                 f"🔎 YouTube multi-search: "
                 f"query={query}, limit={limit}"
             )
+
+            # ------------------------------------------------
+            # NORMALIZE EXCLUDE IDS
+            # ------------------------------------------------
+
+            excluded = set(
+                exclude_ids or set()
+            )
+
+            # ------------------------------------------------
+            # SEARCH
+            # ------------------------------------------------
 
             _search = VideosSearch(
                 query,
@@ -338,6 +345,12 @@ class YouTube:
 
             tracks = []
 
+            # ------------------------------------------------
+            # DUPLICATE PROTECTION
+            # ------------------------------------------------
+
+            seen_ids: set[str] = set()
+
             for data in raw_results:
 
                 try:
@@ -347,8 +360,41 @@ class YouTube:
                     )
 
                     if not video_id:
+                        continue
+
+                    # ----------------------------------------
+                    # SKIP CURRENT / RECENTLY PLAYED
+                    # ----------------------------------------
+
+                    if video_id in excluded:
+
+                        logger.debug(
+                            f"⏭️ Skipping excluded "
+                            f"video: {video_id}"
+                        )
 
                         continue
+
+                    # ----------------------------------------
+                    # SKIP DUPLICATE SEARCH RESULT
+                    # ----------------------------------------
+
+                    if video_id in seen_ids:
+
+                        logger.debug(
+                            f"⏭️ Skipping duplicate "
+                            f"search result: {video_id}"
+                        )
+
+                        continue
+
+                    seen_ids.add(
+                        video_id
+                    )
+
+                    # ----------------------------------------
+                    # VIDEO INFO
+                    # ----------------------------------------
 
                     duration = data.get(
                         "duration"
@@ -376,6 +422,10 @@ class YouTube:
                             )
                             .split("?")[0]
                         )
+
+                    # ----------------------------------------
+                    # TRACK
+                    # ----------------------------------------
 
                     track = Track(
                         id=video_id,
@@ -425,7 +475,6 @@ class YouTube:
                         ),
 
                         is_live=is_live,
-
                     )
 
                     track.file_path = None
@@ -447,7 +496,7 @@ class YouTube:
 
             logger.info(
                 f"🔎 YouTube multi-search "
-                f"returned {len(tracks)} results"
+                f"returned {len(tracks)} unique results"
             )
 
             return tracks
@@ -471,7 +520,6 @@ class YouTube:
         user: str,
         url: str,
     ) -> list[Track]:
-
         """Extract tracks from a YouTube playlist."""
 
         try:
@@ -487,12 +535,9 @@ class YouTube:
                 or "videos" not in plist
                 or not plist["videos"]
             ):
-
                 return []
 
-            for data in plist[
-                "videos"
-            ][:limit]:
+            for data in plist["videos"][:limit]:
 
                 try:
 
@@ -588,7 +633,6 @@ class YouTube:
         is_live: bool = False,
         video: bool = False,
     ) -> str | None:
-
         """
         Download YouTube media directly
         using the local downloader.
