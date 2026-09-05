@@ -85,7 +85,6 @@ class YouTube:
         link = None
 
         if message_1.reply_to_message:
-
             messages.append(
                 message_1.reply_to_message
             )
@@ -335,23 +334,14 @@ class YouTube:
 
             track = Track(
                 id=video_id,
-
                 channel_name=channel_name,
-
                 duration=duration_text,
-
                 duration_sec=duration_sec,
-
                 message_id=m_id,
-
                 title=title,
-
                 thumbnail=thumbnail_url,
-
                 url=video_url,
-
                 view_count=view_count,
-
                 is_live=is_live,
             )
 
@@ -453,7 +443,6 @@ class YouTube:
                 )
 
                 if not track:
-
                     return None
 
                 # ------------------------------------------------
@@ -518,10 +507,7 @@ class YouTube:
 
         Used as autoplay fallback.
 
-        IMPORTANT:
-        Titles are NOT truncated here because
-        autoplay duplicate detection needs
-        the complete title.
+        Titles are NOT truncated here.
         """
 
         try:
@@ -532,7 +518,6 @@ class YouTube:
             ).strip()
 
             if not query:
-
                 return []
 
             logger.info(
@@ -541,17 +526,9 @@ class YouTube:
                 f"limit={limit}"
             )
 
-            # ------------------------------------------------
-            # EXCLUDED IDS
-            # ------------------------------------------------
-
             excluded = set(
                 exclude_ids or set()
             )
-
-            # ------------------------------------------------
-            # SEARCH
-            # ------------------------------------------------
 
             _search = VideosSearch(
                 query,
@@ -561,12 +538,6 @@ class YouTube:
             results = await _search.next()
 
             if not results:
-
-                logger.warning(
-                    f"⚠️ No search response "
-                    f"for '{query}'"
-                )
-
                 return []
 
             raw_results = results.get(
@@ -575,20 +546,9 @@ class YouTube:
             )
 
             if not raw_results:
-
-                logger.warning(
-                    f"⚠️ No search results "
-                    f"for '{query}'"
-                )
-
                 return []
 
             tracks = []
-
-            # ------------------------------------------------
-            # DUPLICATE IDS
-            # ------------------------------------------------
-
             seen_ids: set[str] = set()
 
             for data in raw_results:
@@ -600,42 +560,17 @@ class YouTube:
                     )
 
                     if not video_id:
-
                         continue
-
-                    # ----------------------------------------
-                    # EXCLUDED
-                    # ----------------------------------------
 
                     if video_id in excluded:
-
-                        logger.debug(
-                            f"⏭️ Skipping excluded "
-                            f"video: {video_id}"
-                        )
-
                         continue
 
-                    # ----------------------------------------
-                    # DUPLICATE
-                    # ----------------------------------------
-
                     if video_id in seen_ids:
-
-                        logger.debug(
-                            f"⏭️ Skipping duplicate "
-                            f"video: {video_id}"
-                        )
-
                         continue
 
                     seen_ids.add(
                         video_id
                     )
-
-                    # ----------------------------------------
-                    # TRACK
-                    # ----------------------------------------
 
                     track = (
                         self._track_from_data(
@@ -646,7 +581,6 @@ class YouTube:
                     )
 
                     if not track:
-
                         continue
 
                     tracks.append(
@@ -664,8 +598,7 @@ class YouTube:
 
             logger.info(
                 f"🔎 YouTube multi-search "
-                f"returned "
-                f"{len(tracks)} "
+                f"returned {len(tracks)} "
                 f"unique results"
             )
 
@@ -691,26 +624,12 @@ class YouTube:
     ) -> list[Track]:
 
         """
-        Get YouTube Related / Up Next videos
-        for the currently playing video.
+        Get YouTube Related / Up Next videos.
 
-        This is used by autoplay.
-
-        Flow:
-
-            current video ID
-                    ↓
-            YouTube watch page
-                    ↓
-            Innertube next endpoint
-                    ↓
-            Related / Up Next videos
-                    ↓
-            Track list
+        Used by autoplay.
         """
 
         if not video_id:
-
             return []
 
         video_id = str(
@@ -718,12 +637,11 @@ class YouTube:
         ).strip()
 
         if not video_id:
-
             return []
 
         logger.info(
-            f"🤖 Fetching YouTube related "
-            f"videos for: {video_id}"
+            f"🤖 Fetching YouTube Related / "
+            f"Up Next: {video_id}"
         )
 
         watch_url = (
@@ -758,7 +676,7 @@ class YouTube:
             ) as session:
 
                 # ============================================
-                # GET WATCH PAGE
+                # WATCH PAGE
                 # ============================================
 
                 async with session.get(
@@ -770,8 +688,7 @@ class YouTube:
 
                         logger.warning(
                             f"🤖 YouTube watch page "
-                            f"returned "
-                            f"{response.status}"
+                            f"returned {response.status}"
                         )
 
                         return []
@@ -781,7 +698,7 @@ class YouTube:
                     )
 
                 # ============================================
-                # INNERTUBE API KEY
+                # API KEY
                 # ============================================
 
                 api_key_match = re.search(
@@ -792,8 +709,7 @@ class YouTube:
                 if not api_key_match:
 
                     logger.warning(
-                        "🤖 YouTube "
-                        "INNERTUBE_API_KEY "
+                        "🤖 INNERTUBE_API_KEY "
                         "not found"
                     )
 
@@ -819,7 +735,7 @@ class YouTube:
                 )
 
                 # ============================================
-                # INNERTUBE NEXT
+                # NEXT ENDPOINT
                 # ============================================
 
                 next_url = (
@@ -829,23 +745,15 @@ class YouTube:
                 )
 
                 payload = {
-
                     "context": {
-
                         "client": {
-
                             "hl": "en",
-
                             "gl": "IN",
-
-                            "clientName":
-                                "WEB",
-
+                            "clientName": "WEB",
                             "clientVersion":
                                 client_version,
                         }
                     },
-
                     "videoId":
                         video_id,
                 }
@@ -853,14 +761,21 @@ class YouTube:
                 async with session.post(
                     next_url,
                     json=payload,
+                    headers={
+                        "Content-Type":
+                            "application/json",
+                        "Origin":
+                            "https://www.youtube.com",
+                        "Referer":
+                            watch_url,
+                    },
                 ) as response:
 
                     if response.status != 200:
 
                         logger.warning(
-                            f"🤖 YouTube related "
-                            f"endpoint returned "
-                            f"{response.status}"
+                            f"🤖 YouTube /next "
+                            f"returned {response.status}"
                         )
 
                         return []
@@ -874,7 +789,7 @@ class YouTube:
         except asyncio.TimeoutError:
 
             logger.warning(
-                f"⏱️ YouTube related "
+                f"⏱️ YouTube Related "
                 f"request timed out: "
                 f"{video_id}"
             )
@@ -884,9 +799,8 @@ class YouTube:
         except Exception as e:
 
             logger.warning(
-                f"🤖 Related video request "
-                f"failed for "
-                f"{video_id}: {e}"
+                f"🤖 Related request "
+                f"failed for {video_id}: {e}"
             )
 
             return []
@@ -895,88 +809,152 @@ class YouTube:
         # FIND SECONDARY RESULTS
         # ====================================================
 
-        secondary = (
-            data
-            .get(
-                "contents",
-                {}
-            )
-            .get(
-                "twoColumnWatchNextResults",
-                {}
-            )
-            .get(
-                "secondaryResults",
-                {}
-            )
-            .get(
-                "secondaryResults",
-                {}
-            )
-            .get(
-                "results",
-                []
-            )
-        )
+        secondary = []
 
-        # ----------------------------------------------------
-        # Alternate structure
-        # ----------------------------------------------------
+        try:
 
-        if not secondary:
-
-            secondary = (
-                data
-                .get(
+            contents = (
+                data.get(
                     "contents",
                     {}
                 )
-                .get(
+            )
+
+            two_column = (
+                contents.get(
                     "twoColumnWatchNextResults",
                     {}
                 )
-                .get(
+            )
+
+            secondary_data = (
+                two_column.get(
                     "secondaryResults",
                     {}
                 )
-                .get(
-                    "results",
-                    []
-                )
             )
 
-        # ----------------------------------------------------
-        # Another possible structure
-        # ----------------------------------------------------
+            if isinstance(
+                secondary_data,
+                dict,
+            ):
+
+                nested = (
+                    secondary_data.get(
+                        "secondaryResults",
+                        {}
+                    )
+                )
+
+                if isinstance(
+                    nested,
+                    dict,
+                ):
+
+                    secondary = (
+                        nested.get(
+                            "results",
+                            []
+                        )
+                        or []
+                    )
+
+                if not secondary:
+
+                    secondary = (
+                        secondary_data.get(
+                            "results",
+                            []
+                        )
+                        or []
+                    )
+
+        except Exception as e:
+
+            logger.debug(
+                f"🤖 Related structure "
+                f"parse failed: {e}"
+            )
+
+        # ====================================================
+        # FALLBACK RECURSIVE SEARCH
+        # ====================================================
 
         if not secondary:
 
+            def find_video_renderers(
+                obj,
+            ):
+
+                found = []
+
+                if isinstance(
+                    obj,
+                    dict,
+                ):
+
+                    if (
+                        "compactVideoRenderer"
+                        in obj
+                    ):
+
+                        found.append(
+                            obj
+                        )
+
+                    elif (
+                        "videoRenderer"
+                        in obj
+                    ):
+
+                        found.append(
+                            obj
+                        )
+
+                    elif (
+                        "compactAutoplayRenderer"
+                        in obj
+                    ):
+
+                        found.append(
+                            obj
+                        )
+
+                    for value in obj.values():
+
+                        found.extend(
+                            find_video_renderers(
+                                value
+                            )
+                        )
+
+                elif isinstance(
+                    obj,
+                    list,
+                ):
+
+                    for value in obj:
+
+                        found.extend(
+                            find_video_renderers(
+                                value
+                            )
+                        )
+
+                return found
+
             secondary = (
-                data
-                .get(
-                    "contents",
-                    {}
-                )
-                .get(
-                    "singleColumnWatchNextResults",
-                    {}
-                )
-                .get(
-                    "results",
-                    {}
-                )
-                .get(
-                    "results",
-                    []
+                find_video_renderers(
+                    data
                 )
             )
 
         if not secondary:
 
             logger.warning(
-                f"🤖 No YouTube related "
-                f"results found for "
-                f"{video_id}"
+                f"🤖 No YouTube Related / "
+                f"Up Next results found "
+                f"for {video_id}"
             )
 
             return []
@@ -986,12 +964,20 @@ class YouTube:
         # ====================================================
 
         tracks = []
-
         seen_ids = set()
 
         for item in secondary:
 
+            if len(tracks) >= limit:
+                break
+
             try:
+
+                if not isinstance(
+                    item,
+                    dict,
+                ):
+                    continue
 
                 renderer = (
                     item.get(
@@ -1006,7 +992,6 @@ class YouTube:
                 )
 
                 if not renderer:
-
                     continue
 
                 related_id = (
@@ -1016,30 +1001,36 @@ class YouTube:
                 )
 
                 if not related_id:
-
                     continue
 
-                # --------------------------------------------
+                # ------------------------------------------------
+                # CURRENT VIDEO
+                # ------------------------------------------------
+
+                if related_id == video_id:
+                    continue
+
+                # ------------------------------------------------
                 # DUPLICATE
-                # --------------------------------------------
+                # ------------------------------------------------
 
                 if related_id in seen_ids:
-
                     continue
 
                 seen_ids.add(
                     related_id
                 )
 
-                # --------------------------------------------
+                # ------------------------------------------------
                 # TITLE
-                # --------------------------------------------
+                # ------------------------------------------------
 
                 title_data = (
                     renderer.get(
                         "title",
                         {}
                     )
+                    or {}
                 )
 
                 title = ""
@@ -1068,13 +1059,17 @@ class YouTube:
                         ]
                     )
 
-                if not title:
+                title = (
+                    title
+                    or ""
+                ).strip()
 
+                if not title:
                     continue
 
-                # --------------------------------------------
+                # ------------------------------------------------
                 # DURATION
-                # --------------------------------------------
+                # ------------------------------------------------
 
                 duration_text = ""
 
@@ -1083,6 +1078,7 @@ class YouTube:
                         "lengthText",
                         {}
                     )
+                    or {}
                 )
 
                 if length_data.get(
@@ -1095,9 +1091,9 @@ class YouTube:
                         ]
                     )
 
-                # --------------------------------------------
+                # ------------------------------------------------
                 # LIVE
-                # --------------------------------------------
+                # ------------------------------------------------
 
                 is_live = False
 
@@ -1116,6 +1112,7 @@ class YouTube:
                             "metadataBadgeRenderer",
                             {}
                         )
+                        or {}
                     )
 
                     badge_label = (
@@ -1149,15 +1146,20 @@ class YouTube:
 
                 else:
 
+                    duration_text = (
+                        duration_text
+                        or "0:00"
+                    )
+
                     duration_sec = (
                         self._duration_to_seconds(
                             duration_text
                         )
                     )
 
-                # --------------------------------------------
+                # ------------------------------------------------
                 # CHANNEL
-                # --------------------------------------------
+                # ------------------------------------------------
 
                 channel_name = ""
 
@@ -1170,38 +1172,47 @@ class YouTube:
                         "longBylineText",
                         {}
                     )
+                    or {}
                 )
 
-                if byline.get(
-                    "runs"
-                ):
+                runs = (
+                    byline.get(
+                        "runs",
+                        []
+                    )
+                    or []
+                )
+
+                if runs:
 
                     channel_name = (
-                        byline[
-                            "runs"
-                        ][0]
-                        .get(
+                        runs[0].get(
                             "text",
-                            "",
+                            ""
                         )
+                        or ""
                     )
 
-                # --------------------------------------------
+                # ------------------------------------------------
                 # THUMBNAIL
-                # --------------------------------------------
+                # ------------------------------------------------
 
                 thumbnail_url = ""
 
-                thumbnails = (
-                    renderer
-                    .get(
+                thumbnail_data = (
+                    renderer.get(
                         "thumbnail",
                         {}
                     )
-                    .get(
+                    or {}
+                )
+
+                thumbnails = (
+                    thumbnail_data.get(
                         "thumbnails",
                         []
                     )
+                    or []
                 )
 
                 if thumbnails:
@@ -1212,12 +1223,12 @@ class YouTube:
                             "url",
                             "",
                         )
-                        .split("?")[0]
-                    )
+                        or ""
+                    ).split("?")[0]
 
-                # --------------------------------------------
+                # ------------------------------------------------
                 # VIEW COUNT
-                # --------------------------------------------
+                # ------------------------------------------------
 
                 view_count = ""
 
@@ -1226,6 +1237,7 @@ class YouTube:
                         "viewCountText",
                         {}
                     )
+                    or {}
                 )
 
                 if view_data.get(
@@ -1252,39 +1264,23 @@ class YouTube:
                         ]
                     )
 
-                # --------------------------------------------
-                # TRACK
-                # --------------------------------------------
+                # ------------------------------------------------
+                # CREATE TRACK
+                # ------------------------------------------------
 
                 track = Track(
-
                     id=related_id,
-
                     channel_name=channel_name,
-
-                    duration=(
-                        duration_text
-                        if duration_text
-                        else "0:00"
-                    ),
-
-                    duration_sec=(
-                        duration_sec
-                    ),
-
+                    duration=duration_text,
+                    duration_sec=duration_sec,
                     message_id=0,
-
                     title=title,
-
                     thumbnail=thumbnail_url,
-
                     url=(
                         self.base
                         + related_id
                     ),
-
                     view_count=view_count,
-
                     is_live=is_live,
                 )
 
@@ -1296,22 +1292,18 @@ class YouTube:
                     track
                 )
 
-                if len(tracks) >= limit:
-
-                    break
-
             except Exception as e:
 
                 logger.debug(
-                    f"🤖 Invalid related "
-                    f"video skipped: {e}"
+                    f"🤖 Related item "
+                    f"skipped: {e}"
                 )
 
                 continue
 
         logger.info(
             f"🤖 YouTube Related returned "
-            f"{len(tracks)} videos for "
+            f"{len(tracks)} candidates for "
             f"{video_id}"
         )
 
@@ -1327,7 +1319,6 @@ class YouTube:
     ) -> int:
 
         if not value:
-
             return 0
 
         try:
@@ -1337,7 +1328,6 @@ class YouTube:
             ).strip()
 
             if not value:
-
                 return 0
 
             parts = [
@@ -1361,11 +1351,9 @@ class YouTube:
                 )
 
             if len(parts) == 1:
-
                 return parts[0]
 
         except Exception:
-
             pass
 
         return 0
@@ -1522,7 +1510,6 @@ class YouTube:
         try:
 
             if not video_id:
-
                 return None
 
             youtube_url = (
