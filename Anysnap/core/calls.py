@@ -2076,10 +2076,13 @@ class TgCall(PyTgCalls):
                                         f"{search_query}"
                                     )
 
-                                    results = (
-                                        await yt.search(
-                                            search_query
-                                        )
+                                    # IMPORTANT:
+                                    # yt.search() requires:
+                                    # search(m_id, query)
+
+                                    results = await yt.search(
+                                        chat_id,
+                                        search_query,
                                     )
 
                                     next_track = None
