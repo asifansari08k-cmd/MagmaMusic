@@ -9,9 +9,7 @@ from Anysnap.helpers import can_manage_vc
 # ============================================================
 
 @app.on_message(
-    filters.command(
-        ["autoplay", "cautoplay"]
-    )
+    filters.command(["autoplay", "cautoplay"])
     & filters.group
     & ~app.bl_users
 )
@@ -26,11 +24,8 @@ async def _autoplay(
     # ========================================================
 
     try:
-
         await m.delete()
-
     except Exception:
-
         pass
 
     # ========================================================
@@ -43,10 +38,9 @@ async def _autoplay(
         else "autoplay"
     )
 
-    is_channel = (
-        command == "cautoplay"
-    )
+    is_channel = command == "cautoplay"
 
+    # This is the group where command was used
     group_id = m.chat.id
 
     # ========================================================
@@ -54,62 +48,17 @@ async def _autoplay(
     # ========================================================
 
     try:
-
-        channel_id = await db.get_cmode(
-            group_id
-        )
-
+        channel_id = await db.get_cmode(group_id)
     except Exception:
-
         channel_id = None
-
-    # ========================================================
-    # SELECT AUTOPLAY CHAT
-    # ========================================================
-
-    # /cautoplay
-    #
-    # Autoplay setting belongs to the
-    # actual channel where playback happens.
-    #
-    if is_channel:
-
-        if channel_id is None:
-
-            return await m.reply_text(
-                "<blockquote>"
-                "❌ <b>Channel play is not enabled.</b>\n\n"
-                "First enable channel playback using "
-                "<code>/channelplay</code>."
-                "</blockquote>"
-            )
-
-        autoplay_chat_id = channel_id
-
-    # /autoplay
-    #
-    # If channel mode is active, use the
-    # linked channel automatically.
-    #
-    else:
-
-        autoplay_chat_id = (
-            channel_id
-            if channel_id is not None
-            else group_id
-        )
 
     # ========================================================
     # NO ARGUMENT
     # ========================================================
 
-    if (
-        not m.command
-        or len(m.command) < 2
-    ):
+    if not m.command or len(m.command) < 2:
 
         if is_channel:
-
             return await m.reply_text(
                 "<blockquote>"
                 "🎵 <b>Channel Autoplay</b>\n\n"
@@ -141,13 +90,9 @@ async def _autoplay(
         .lower()
     )
 
-    if action not in (
-        "on",
-        "off",
-    ):
+    if action not in ("on", "off"):
 
         if is_channel:
-
             return await m.reply_text(
                 "<blockquote>"
                 "❌ <b>Invalid option.</b>\n\n"
@@ -166,24 +111,66 @@ async def _autoplay(
             "</blockquote>"
         )
 
-    # ========================================================
-    # ENABLE / DISABLE
-    # ========================================================
-
-    enabled = (
-        action == "on"
-    )
+    enabled = action == "on"
 
     # ========================================================
-    # SAVE TO MONGODB
+    # DETERMINE PLAYBACK CHAT
+    # ========================================================
+
+    if is_channel:
+
+        if channel_id is None:
+            return await m.reply_text(
+                "<blockquote>"
+                "❌ <b>Channel play is not enabled.</b>\n\n"
+                "First enable channel playback using "
+                "<code>/channelplay</code>."
+                "</blockquote>"
+            )
+
+        playback_chat_id = channel_id
+
+    else:
+
+        playback_chat_id = (
+            channel_id
+            if channel_id is not None
+            else group_id
+        )
+
+    # ========================================================
+    # SAVE AUTOPLAY
+    # ========================================================
+    #
+    # IMPORTANT:
+    # Save on BOTH IDs.
+    #
+    # /autoplay may be configured from the group,
+    # while StreamEnded may return the group/call ID.
+    #
+    # Channel mode may use the linked channel ID.
+    #
+    # This prevents:
+    #
+    # setting → ID A = True
+    # playback → ID B = False
+    #
     # ========================================================
 
     try:
 
+        # Always save group ID
         await db.set_autoplay(
-            autoplay_chat_id,
+            group_id,
             enabled,
         )
+
+        # If channel mode exists, also save channel ID
+        if channel_id is not None:
+            await db.set_autoplay(
+                channel_id,
+                enabled,
+            )
 
     except Exception as e:
 
@@ -195,20 +182,35 @@ async def _autoplay(
         )
 
     # ========================================================
-    # VERIFY DATABASE
+    # VERIFY
     # ========================================================
 
     try:
 
-        current_status = (
-            await db.get_autoplay(
-                autoplay_chat_id
-            )
+        group_status = await db.get_autoplay(
+            group_id
+        )
+
+        channel_status = (
+            await db.get_autoplay(channel_id)
+            if channel_id is not None
+            else None
         )
 
     except Exception:
 
-        current_status = enabled
+        group_status = enabled
+        channel_status = enabled if channel_id is not None else None
+
+    # ========================================================
+    # FINAL STATUS
+    # ========================================================
+
+    current_status = (
+        channel_status
+        if is_channel and channel_id is not None
+        else group_status
+    )
 
     # ========================================================
     # SUCCESS MESSAGE
@@ -264,11 +266,6 @@ async def _autoplay(
     # ========================================================
 
     try:
-
-        await m.reply_text(
-            text
-        )
-
+        await m.reply_text(text)
     except Exception:
-
         pass
