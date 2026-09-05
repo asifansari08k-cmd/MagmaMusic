@@ -3,17 +3,14 @@ name: Clean Old VC Music Bot Runs
 on:
   workflow_dispatch:
 
-permissions:
-  actions: write
-
 jobs:
   cleanup:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Delete runs directly
+      - name: Delete old runs
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.GH_PERSONAL_TOKEN }}
         run: |
           gh api --paginate \
             "/repos/${{ github.repository }}/actions/workflows" \
@@ -32,11 +29,12 @@ jobs:
                   )
                 | .id' |
             while read run_id; do
+
               gh api --method DELETE \
                 "/repos/${{ github.repository }}/actions/runs/$run_id" \
                 >/dev/null 2>&1 || true
-            done
 
+            done
           done
 
           echo "Cleanup complete."
