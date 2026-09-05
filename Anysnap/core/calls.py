@@ -69,6 +69,19 @@ class TgCall(PyTgCalls):
         # Currently playing track for autoplay
         self._autoplay_current = {}
 
+        # ====================================================
+        # AUTOPLAY HISTORY
+        # ====================================================
+
+        # chat_id -> list of recently played YouTube IDs
+        #
+        # This prevents autoplay from repeatedly selecting
+        # the same songs.
+        self._autoplay_history = {}
+
+        # Remember last 10 played IDs per chat.
+        self._autoplay_history_limit = 10
+
     # ========================================================
     # AUTOPLAY STATUS
     # ========================================================
@@ -274,6 +287,89 @@ class TgCall(PyTgCalls):
             )
 
         return None
+
+    # ========================================================
+    # AUTOPLAY HISTORY
+    # ========================================================
+
+    def _get_autoplay_history(
+        self,
+        chat_id: int,
+    ) -> set[str]:
+        """
+        Return recently played YouTube video IDs.
+        """
+
+        history = self._autoplay_history.get(
+            chat_id,
+            [],
+        )
+
+        return set(history)
+
+    def _remember_autoplay_track(
+        self,
+        chat_id: int,
+        video_id: str | None,
+    ) -> None:
+        """
+        Remember a played video ID.
+
+        Only the latest N IDs are retained.
+        """
+
+        if not video_id:
+            return
+
+        history = self._autoplay_history.setdefault(
+            chat_id,
+            [],
+        )
+
+        # If already present, move to newest position
+        if video_id in history:
+
+            history.remove(
+                video_id
+            )
+
+        history.append(
+            video_id
+        )
+
+        # Keep only latest IDs
+        if (
+            len(history)
+            > self._autoplay_history_limit
+        ):
+
+            del history[
+                :-self._autoplay_history_limit
+            ]
+
+        logger.debug(
+            f"🤖 Autoplay history updated: "
+            f"chat={chat_id}, "
+            f"history={history}"
+        )
+
+    def _clear_autoplay_history(
+        self,
+        chat_id: int,
+    ) -> None:
+        """
+        Clear autoplay history.
+        """
+
+        self._autoplay_history.pop(
+            chat_id,
+            None,
+        )
+
+        logger.debug(
+            f"🤖 Autoplay history cleared: "
+            f"chat={chat_id}"
+        )
 
     # ========================================================
     # EDIT MEDIA WITH RETRY
@@ -546,6 +642,14 @@ class TgCall(PyTgCalls):
         )
 
         # ----------------------------------------------------
+        # Clear autoplay history
+        # ----------------------------------------------------
+
+        self._clear_autoplay_history(
+            chat_id
+        )
+
+        # ----------------------------------------------------
         # Clear mapped autoplay current
         # ----------------------------------------------------
 
@@ -573,6 +677,10 @@ class TgCall(PyTgCalls):
                         None,
                     )
 
+                    self._clear_autoplay_history(
+                        group_id
+                    )
+
             else:
 
                 channel_id = await db.get_cmode(
@@ -584,6 +692,10 @@ class TgCall(PyTgCalls):
                     self._autoplay_current.pop(
                         channel_id,
                         None,
+                    )
+
+                    self._clear_autoplay_history(
+                        channel_id
                     )
 
         except Exception:
@@ -1084,6 +1196,19 @@ class TgCall(PyTgCalls):
                     chat_id
                 ] = media
 
+                # ------------------------------------------------
+                # Remember played track
+                # ------------------------------------------------
+
+                self._remember_autoplay_track(
+                    chat_id,
+                    getattr(
+                        media,
+                        "id",
+                        None,
+                    ),
+                )
+
                 logger.info(
                     f"🤖 Autoplay current track: "
                     f"{getattr(media, 'title', 'Unknown')}"
@@ -1116,6 +1241,15 @@ class TgCall(PyTgCalls):
                                 group_id
                             ] = media
 
+                            self._remember_autoplay_track(
+                                group_id,
+                                getattr(
+                                    media,
+                                    "id",
+                                    None,
+                                ),
+                            )
+
                     else:
 
                         channel_id = await db.get_cmode(
@@ -1127,6 +1261,15 @@ class TgCall(PyTgCalls):
                             self._autoplay_current[
                                 channel_id
                             ] = media
+
+                            self._remember_autoplay_track(
+                                channel_id,
+                                getattr(
+                                    media,
+                                    "id",
+                                    None,
+                                ),
+                            )
 
                 except Exception as e:
 
@@ -2098,11 +2241,36 @@ class TgCall(PyTgCalls):
 
                                 logger.info(
                                     f"🤖 Autoplay source: "
-                                    f"{search_query}"
+                                    f"{search_query} "
+                                    f"[{current_id}]"
                                 )
 
                                 # =================================
-                                # SEARCH 5 RESULTS
+                                # RECENT HISTORY
+                                # =================================
+
+                                recent_ids = (
+                                    self._get_autoplay_history(
+                                        chat_id
+                                    )
+                                )
+
+                                # Current song must always
+                                # be excluded.
+                                if current_id:
+
+                                    recent_ids.add(
+                                        current_id
+                                    )
+
+                                logger.info(
+                                    f"🤖 Autoplay excluded "
+                                    f"{len(recent_ids)} "
+                                    f"recent/current IDs"
+                                )
+
+                                # =================================
+                                # SEARCH
                                 # =================================
 
                                 if search_query:
@@ -2118,83 +2286,100 @@ class TgCall(PyTgCalls):
                                             search_query,
                                             m_id=0,
                                             limit=5,
+                                            exclude_ids=recent_ids,
                                         )
+                                    )
+
+                                    logger.info(
+                                        f"🤖 Autoplay received "
+                                        f"{len(results)} "
+                                        f"usable results"
                                     )
 
                                     next_track = None
 
                                     # =================================
-                                    # FIND DIFFERENT VIDEO
+                                    # FIND NEW RESULT
                                     # =================================
 
-                                    if results:
+                                    for index, track in enumerate(
+                                        results,
+                                        start=1,
+                                    ):
 
-                                        logger.info(
-                                            f"🤖 Autoplay received "
-                                            f"{len(results)} results"
+                                        track_id = getattr(
+                                            track,
+                                            "id",
+                                            None,
                                         )
 
-                                        for index, track in enumerate(
-                                            results,
-                                            start=1,
-                                        ):
+                                        track_title = getattr(
+                                            track,
+                                            "title",
+                                            "Unknown",
+                                        )
 
-                                            track_id = getattr(
-                                                track,
-                                                "id",
-                                                None,
-                                            )
+                                        logger.info(
+                                            f"🤖 Result {index}: "
+                                            f"{track_title} "
+                                            f"[{track_id}]"
+                                        )
 
-                                            track_title = getattr(
-                                                track,
-                                                "title",
-                                                "Unknown",
-                                            )
+                                        # -------------------------
+                                        # Invalid
+                                        # -------------------------
+
+                                        if not track_id:
 
                                             logger.info(
-                                                f"🤖 Result {index}: "
-                                                f"{track_title} "
-                                                f"[{track_id}]"
+                                                "⏭️ Skipping result "
+                                                "without video ID"
                                             )
 
-                                            # -------------------------
-                                            # Skip current video
-                                            # -------------------------
+                                            continue
 
-                                            if (
-                                                not track_id
-                                                or track_id
-                                                == current_id
-                                            ):
+                                        # -------------------------
+                                        # Current / history
+                                        # -------------------------
 
-                                                logger.info(
-                                                    f"⏭️ Skipping same "
-                                                    f"video: {track_id}"
-                                                )
+                                        if (
+                                            track_id
+                                            in recent_ids
+                                        ):
 
-                                                continue
+                                            logger.info(
+                                                f"⏭️ Skipping recent/"
+                                                f"current video: "
+                                                f"{track_id}"
+                                            )
 
-                                            # -------------------------
-                                            # Skip live streams
-                                            # -------------------------
+                                            continue
 
-                                            if getattr(
-                                                track,
-                                                "is_live",
-                                                False,
-                                            ):
+                                        # -------------------------
+                                        # Live
+                                        # -------------------------
 
-                                                logger.info(
-                                                    f"⏭️ Skipping live "
-                                                    f"result: "
-                                                    f"{track_title}"
-                                                )
+                                        if getattr(
+                                            track,
+                                            "is_live",
+                                            False,
+                                        ):
 
-                                                continue
+                                            logger.info(
+                                                f"⏭️ Skipping live "
+                                                f"result: "
+                                                f"{track_title}"
+                                            )
 
-                                            next_track = track
+                                            continue
 
-                                            break
+                                        # -------------------------
+                                        # Select
+                                        # -------------------------
+
+                                        next_track = track
+
+                                        break
 
                                     # =================================
                                     # DOWNLOAD SELECTED TRACK
@@ -2226,6 +2411,10 @@ class TgCall(PyTgCalls):
                                             )
                                         )
 
+                                        # =================================
+                                        # DOWNLOAD SUCCESS
+                                        # =================================
+
                                         if (
                                             next_track.file_path
                                         ):
@@ -2239,6 +2428,10 @@ class TgCall(PyTgCalls):
                                                 f"{next_track.file_path}"
                                             )
 
+                                        # =================================
+                                        # DOWNLOAD FAILED
+                                        # =================================
+
                                         else:
 
                                             logger.error(
@@ -2247,12 +2440,16 @@ class TgCall(PyTgCalls):
                                                 f"{next_track.id}"
                                             )
 
+                                    # =================================
+                                    # NOTHING FOUND
+                                    # =================================
+
                                     else:
 
                                         logger.warning(
                                             f"🤖 Autoplay found no "
-                                            f"different track for "
-                                            f"{chat_id}"
+                                            f"new/different track "
+                                            f"for {chat_id}"
                                         )
 
                                 else:
