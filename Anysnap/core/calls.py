@@ -51,13 +51,6 @@ class TgCall(PyTgCalls):
         self._play_next_locks = {}
         self._stream_end_cache = {}
 
-        # =====================================================
-        # 🤖 AUTOPLAY
-        # Stores the currently playing track.
-        # This is used when the queue becomes empty.
-        # =====================================================
-        self._autoplay_current = {}
-
     async def _edit_media_with_retry(
         self,
         message: Message,
@@ -258,12 +251,6 @@ class TgCall(PyTgCalls):
 
             await db.remove_call(
                 chat_id
-            )
-
-            # Clear autoplay current track
-            self._autoplay_current.pop(
-                chat_id,
-                None,
             )
 
         except Exception as e:
@@ -676,7 +663,7 @@ class TgCall(PyTgCalls):
                 media.time = 1
 
             # =====================================================
-            # NEW NORMAL PLAYBACK
+            # NORMAL PLAYBACK
             # =====================================================
 
             if not seek_time:
@@ -684,14 +671,6 @@ class TgCall(PyTgCalls):
                 await db.add_call(
                     chat_id
                 )
-
-                # =================================================
-                # 🤖 SAVE CURRENT TRACK FOR AUTOPLAY
-                # =================================================
-
-                self._autoplay_current[
-                    chat_id
-                ] = media
 
                 owner_name = getattr(
                     config,
@@ -1349,6 +1328,14 @@ class TgCall(PyTgCalls):
                         return
 
                 # =================================================
+                # SAVE CURRENT TRACK BEFORE REMOVING IT
+                # =================================================
+
+                current_media = queue.get_current(
+                    chat_id
+                )
+
+                # =================================================
                 # LOOP WHOLE QUEUE
                 # =================================================
 
@@ -1468,31 +1455,24 @@ class TgCall(PyTgCalls):
                                 f"for {chat_id}"
                             )
 
-                            # IMPORTANT:
-                            # Do NOT use queue.get_current()
-                            # here. The queue pointer can already
-                            # be at the end.
-                            current_media = (
-                                self._autoplay_current.get(
-                                    chat_id
-                                )
-                            )
+                            # current_media was captured
+                            # BEFORE queue.get_next().
+                            source_media = current_media
 
-                            if current_media:
+                            if source_media:
 
                                 search_query = getattr(
-                                    current_media,
+                                    source_media,
                                     "title",
                                     "",
                                 )
 
                                 search_query = (
-                                    search_query
-                                   .strip()
+                                    search_query.strip()
                                 )
 
                                 current_id = getattr(
-                                    current_media,
+                                    source_media,
                                     "id",
                                     None,
                                 )
@@ -1541,16 +1521,16 @@ class TgCall(PyTgCalls):
                                             next_track,
                                         )
 
+                                        # IMPORTANT:
+                                        # Do NOT call queue.get_next()
+                                        # here. It would remove the
+                                        # autoplay track immediately.
+                                        media = next_track
+
                                         logger.info(
                                             "🤖 Autoplay selected: "
                                             f"{getattr(next_track, 'title', 'Unknown')}"
                                         )
-
-                                        # IMPORTANT:
-                                        # The track was just selected.
-                                        # Do NOT call queue.get_next()
-                                        # because that can skip the track.
-                                        media = next_track
 
                                     else:
 
@@ -1563,17 +1543,15 @@ class TgCall(PyTgCalls):
                                 else:
 
                                     logger.warning(
-                                        f"🤖 Autoplay has no "
-                                        f"search title for "
-                                        f"{chat_id}"
+                                        f"🤖 Current track has "
+                                        f"no title for {chat_id}"
                                     )
 
                             else:
 
                                 logger.warning(
-                                    f"🤖 Autoplay has no "
-                                    f"current track for "
-                                    f"{chat_id}"
+                                    f"🤖 Current track unavailable "
+                                    f"for {chat_id}"
                                 )
 
                         except Exception as e:
