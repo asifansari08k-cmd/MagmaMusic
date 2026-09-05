@@ -1,5 +1,6 @@
 import asyncio
 import logging
+
 from ntgcalls import ConnectionNotFound, TelegramServerError
 from pyrogram import enums, errors
 from pyrogram.errors import MessageIdInvalid
@@ -7,7 +8,17 @@ from pyrogram.types import InputMediaPhoto, Message
 from pytgcalls import PyTgCalls, exceptions, types
 from pytgcalls.pytgcalls_session import PyTgCallsSession
 
-from Anysnap import app, config, db, lang, logger, preload, queue, userbot, yt
+from Anysnap import (
+    app,
+    config,
+    db,
+    lang,
+    logger,
+    preload,
+    queue,
+    userbot,
+    yt,
+)
 from Anysnap.helpers import Media, Track, buttons, thumb
 
 
@@ -16,15 +27,21 @@ class PyTgCallsErrorFilter(logging.Filter):
     def filter(self, record):
         if "UpdateGroupCall" in record.getMessage():
             return False
+
         if (
             "Connection with chat id" in record.getMessage()
             and "not found" in record.getMessage()
         ):
             return False
+
         return True
 
 
-logging.getLogger("pyrogram.dispatcher").addFilter(PyTgCallsErrorFilter())
+logging.getLogger(
+    "pyrogram.dispatcher"
+).addFilter(
+    PyTgCallsErrorFilter()
+)
 
 
 class TgCall(PyTgCalls):
@@ -33,6 +50,13 @@ class TgCall(PyTgCalls):
         self.clients = []
         self._play_next_locks = {}
         self._stream_end_cache = {}
+
+        # =====================================================
+        # 🤖 AUTOPLAY
+        # Stores the currently playing track.
+        # This is used when the queue becomes empty.
+        # =====================================================
+        self._autoplay_current = {}
 
     async def _edit_media_with_retry(
         self,
@@ -47,7 +71,9 @@ class TgCall(PyTgCalls):
             )
 
         except errors.FloodWait as fw:
-            await asyncio.sleep(fw.value + 1)
+            await asyncio.sleep(
+                fw.value + 1
+            )
 
             try:
                 return await message.edit_media(
@@ -79,7 +105,9 @@ class TgCall(PyTgCalls):
             )
 
         except errors.FloodWait as fw:
-            await asyncio.sleep(fw.value + 1)
+            await asyncio.sleep(
+                fw.value + 1
+            )
 
             try:
                 return await app.send_photo(
@@ -94,80 +122,154 @@ class TgCall(PyTgCalls):
         except Exception:
             return None
 
-    async def pause(self, chat_id: int) -> bool:
-        client = await db.get_assistant(chat_id)
+    async def pause(
+        self,
+        chat_id: int,
+    ) -> bool:
+
+        client = await db.get_assistant(
+            chat_id
+        )
 
         try:
-            await client.pause(chat_id)
-            await db.playing(chat_id, paused=True)
+            await client.pause(
+                chat_id
+            )
+
+            await db.playing(
+                chat_id,
+                paused=True,
+            )
+
             return True
 
         except (
             ConnectionNotFound,
             exceptions.NotInCallError,
         ):
-            await db.playing(chat_id, paused=False)
-            await db.remove_call(chat_id)
-            queue.clear(chat_id)
+            await db.playing(
+                chat_id,
+                paused=False,
+            )
+
+            await db.remove_call(
+                chat_id
+            )
+
+            queue.clear(
+                chat_id
+            )
 
             logger.warning(
-                f"Pause requested but assistant not in call for {chat_id}, syncing state"
+                f"Pause requested but assistant not in call "
+                f"for {chat_id}, syncing state"
             )
+
             return False
 
         except Exception as e:
-            await db.playing(chat_id, paused=False)
+            await db.playing(
+                chat_id,
+                paused=False,
+            )
 
             logger.error(
                 f"Pause failed for {chat_id}: {e}"
             )
+
             return False
 
-    async def resume(self, chat_id: int) -> bool:
-        client = await db.get_assistant(chat_id)
+    async def resume(
+        self,
+        chat_id: int,
+    ) -> bool:
+
+        client = await db.get_assistant(
+            chat_id
+        )
 
         try:
-            await client.resume(chat_id)
-            await db.playing(chat_id, paused=False)
+            await client.resume(
+                chat_id
+            )
+
+            await db.playing(
+                chat_id,
+                paused=False,
+            )
+
             return True
 
         except (
             ConnectionNotFound,
             exceptions.NotInCallError,
         ):
-            await db.playing(chat_id, paused=False)
-            await db.remove_call(chat_id)
-            queue.clear(chat_id)
+            await db.playing(
+                chat_id,
+                paused=False,
+            )
+
+            await db.remove_call(
+                chat_id
+            )
+
+            queue.clear(
+                chat_id
+            )
 
             logger.warning(
-                f"Resume requested but assistant not in call for {chat_id}, syncing state"
+                f"Resume requested but assistant not in call "
+                f"for {chat_id}, syncing state"
             )
+
             return False
 
         except Exception as e:
             logger.error(
                 f"Resume failed for {chat_id}: {e}"
             )
+
             return False
 
-    async def stop(self, chat_id: int) -> None:
-        client = await db.get_assistant(chat_id)
+    async def stop(
+        self,
+        chat_id: int,
+    ) -> None:
+
+        client = await db.get_assistant(
+            chat_id
+        )
 
         try:
-            await preload.cancel_preload(chat_id)
+            await preload.cancel_preload(
+                chat_id
+            )
 
         except Exception as e:
             logger.debug(
-                f"Error cancelling preload for {chat_id}: {e}"
+                f"Error cancelling preload "
+                f"for {chat_id}: {e}"
             )
 
         try:
-            queue.clear(chat_id)
-            await db.remove_call(chat_id)
+            queue.clear(
+                chat_id
+            )
+
+            await db.remove_call(
+                chat_id
+            )
+
+            # Clear autoplay current track
+            self._autoplay_current.pop(
+                chat_id,
+                None,
+            )
 
         except Exception as e:
             logger.warning(
-                f"Error clearing queue/call for {chat_id}: {e}"
+                f"Error clearing queue/call "
+                f"for {chat_id}: {e}"
             )
 
         try:
@@ -176,7 +278,9 @@ class TgCall(PyTgCalls):
                 close=False,
             )
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(
+                0.5
+            )
 
         except (
             ConnectionNotFound,
@@ -199,7 +303,8 @@ class TgCall(PyTgCalls):
                 ]
             ):
                 logger.warning(
-                    f"Error leaving call for {chat_id}: {e}"
+                    f"Error leaving call "
+                    f"for {chat_id}: {e}"
                 )
 
     async def play_media(
@@ -211,8 +316,13 @@ class TgCall(PyTgCalls):
         message_chat_id: int = None,
     ) -> None:
 
-        client = await db.get_assistant(chat_id)
-        _lang = await lang.get_lang(chat_id)
+        client = await db.get_assistant(
+            chat_id
+        )
+
+        _lang = await lang.get_lang(
+            chat_id
+        )
 
         target_chat_for_messages = (
             message_chat_id
@@ -220,34 +330,49 @@ class TgCall(PyTgCalls):
             else chat_id
         )
 
-        if config.THUMB_GEN and isinstance(media, Track):
-            _thumb = await thumb.generate(media)
+        if (
+            config.THUMB_GEN
+            and isinstance(media, Track)
+        ):
+            _thumb = await thumb.generate(
+                media
+            )
         else:
             _thumb = config.DEFAULT_THUMB
 
         if not media.file_path:
+
             if message:
                 return await message.edit_text(
-                    _lang["error_no_file"].format(
+                    _lang[
+                        "error_no_file"
+                    ].format(
                         config.SUPPORT_CHAT
                     )
                 )
 
             logger.error(
-                f"No file path for media in {chat_id}"
+                f"No file path for media "
+                f"in {chat_id}"
             )
+
             return
 
         try:
-            chat = await app.get_chat(chat_id)
+
+            chat = await app.get_chat(
+                chat_id
+            )
 
             if chat.type not in [
                 enums.ChatType.SUPERGROUP,
                 enums.ChatType.GROUP,
                 enums.ChatType.CHANNEL,
             ]:
+
                 logger.error(
-                    f"Invalid chat type for {chat_id}: {chat.type}"
+                    f"Invalid chat type for "
+                    f"{chat_id}: {chat.type}"
                 )
 
                 if message:
@@ -257,14 +382,21 @@ class TgCall(PyTgCalls):
 
                 return
 
+            # =====================================================
             # CHANNEL SUPPORT
+            # =====================================================
+
             if chat.type == enums.ChatType.CHANNEL:
 
-                userbot_client = await db.get_client(chat_id)
+                userbot_client = await db.get_client(
+                    chat_id
+                )
 
                 if not userbot_client:
+
                     logger.error(
-                        f"No userbot client available for {chat_id}"
+                        f"No userbot client available "
+                        f"for {chat_id}"
                     )
 
                     if message:
@@ -275,17 +407,22 @@ class TgCall(PyTgCalls):
                     return
 
                 try:
-                    assistant_member = await app.get_chat_member(
-                        chat_id,
-                        userbot_client.me.id,
+
+                    assistant_member = (
+                        await app.get_chat_member(
+                            chat_id,
+                            userbot_client.me.id,
+                        )
                     )
 
                     if (
                         assistant_member.status
                         == enums.ChatMemberStatus.BANNED
                     ):
+
                         logger.error(
-                            f"Assistant banned in channel {chat_id}"
+                            f"Assistant banned in "
+                            f"channel {chat_id}"
                         )
 
                         await db.set_cmode(
@@ -303,18 +440,24 @@ class TgCall(PyTgCalls):
                 except errors.RPCError as e:
 
                     if (
-                        "CHANNEL_INVALID" in str(e)
-                        or "USER_NOT_PARTICIPANT" in str(e)
+                        "CHANNEL_INVALID"
+                        in str(e)
+                        or "USER_NOT_PARTICIPANT"
+                        in str(e)
                     ):
+
                         logger.error(
-                            f"Assistant not in channel {chat_id}: {e}"
+                            f"Assistant not in channel "
+                            f"{chat_id}: {e}"
                         )
 
                         if message:
                             await message.edit_text(
                                 "❌ <b>Assistant not in channel!</b>\n\n"
-                                f"<blockquote>Please add @{userbot_client.me.username} "
-                                "to the channel as admin with voice chat permissions.</blockquote>"
+                                f"<blockquote>Please add "
+                                f"@{userbot_client.me.username} "
+                                "to the channel as admin with "
+                                "voice chat permissions.</blockquote>"
                             )
 
                         await db.set_cmode(
@@ -327,13 +470,16 @@ class TgCall(PyTgCalls):
         except errors.RPCError as e:
 
             if "CHANNEL_INVALID" in str(e):
+
                 logger.error(
-                    f"Invalid channel {chat_id}: {e}"
+                    f"Invalid channel "
+                    f"{chat_id}: {e}"
                 )
 
                 if message:
                     await message.edit_text(
-                        "❌ Invalid channel. Disabling channel play."
+                        "❌ Invalid channel. "
+                        "Disabling channel play."
                     )
 
                 await db.set_cmode(
@@ -345,7 +491,12 @@ class TgCall(PyTgCalls):
 
             raise
 
+        # =====================================================
+        # FFMPEG PARAMETERS
+        # =====================================================
+
         if seek_time > 1:
+
             ffmpeg_params = (
                 f"-ss {seek_time} "
                 "-probesize 10M "
@@ -355,6 +506,7 @@ class TgCall(PyTgCalls):
             )
 
         else:
+
             ffmpeg_params = (
                 "-probesize 10M "
                 "-analyzeduration 5M "
@@ -384,9 +536,13 @@ class TgCall(PyTgCalls):
         )
 
         try:
-            call = await client.get_call(chat_id)
+
+            call = await client.get_call(
+                chat_id
+            )
 
             if call:
+
                 logger.debug(
                     f"Already connected to {chat_id}, "
                     "leaving before reconnecting..."
@@ -404,8 +560,10 @@ class TgCall(PyTgCalls):
             pass
 
         except Exception as e:
+
             logger.debug(
-                f"Error checking connection state for {chat_id}: {e}"
+                f"Error checking connection state "
+                f"for {chat_id}: {e}"
             )
 
         max_retries = 3
@@ -413,9 +571,12 @@ class TgCall(PyTgCalls):
 
         try:
 
-            for attempt in range(max_retries):
+            for attempt in range(
+                max_retries
+            ):
 
                 try:
+
                     await client.play(
                         chat_id=chat_id,
                         stream=stream,
@@ -434,18 +595,26 @@ class TgCall(PyTgCalls):
                     error_msg = str(e)
 
                     if (
-                        "GROUPCALL_INVALID" in error_msg
-                        or "GROUPCALL" in error_msg
+                        "GROUPCALL_INVALID"
+                        in error_msg
+                        or "GROUPCALL"
+                        in error_msg
                         or isinstance(
                             e,
                             exceptions.NoActiveGroupCall,
                         )
                     ):
 
-                        if attempt < max_retries - 1:
+                        if (
+                            attempt
+                            < max_retries - 1
+                        ):
+
                             logger.debug(
-                                f"Group call transitioning for {chat_id}, "
-                                f"retrying in {retry_delay}s..."
+                                f"Group call transitioning "
+                                f"for {chat_id}, "
+                                f"retrying in "
+                                f"{retry_delay}s..."
                             )
 
                             await asyncio.sleep(
@@ -463,18 +632,26 @@ class TgCall(PyTgCalls):
                     error_msg = str(e).lower()
 
                     if (
-                        "cannot be initialized more than once"
+                        "cannot be initialized "
+                        "more than once"
                         in error_msg
-                        or "connection" in error_msg
+                        or "connection"
+                        in error_msg
                     ):
 
-                        if attempt < max_retries - 1:
+                        if (
+                            attempt
+                            < max_retries - 1
+                        ):
+
                             logger.debug(
-                                f"Connection error for {chat_id}, "
+                                f"Connection error "
+                                f"for {chat_id}, "
                                 "leaving and retrying..."
                             )
 
                             try:
+
                                 await client.leave_call(
                                     chat_id,
                                     close=False,
@@ -498,9 +675,23 @@ class TgCall(PyTgCalls):
             else:
                 media.time = 1
 
+            # =====================================================
+            # NEW NORMAL PLAYBACK
+            # =====================================================
+
             if not seek_time:
 
-                await db.add_call(chat_id)
+                await db.add_call(
+                    chat_id
+                )
+
+                # =================================================
+                # 🤖 SAVE CURRENT TRACK FOR AUTOPLAY
+                # =================================================
+
+                self._autoplay_current[
+                    chat_id
+                ] = media
 
                 owner_name = getattr(
                     config,
@@ -514,7 +705,9 @@ class TgCall(PyTgCalls):
                     "https://t.me/ANYSNAP",
                 )
 
-                text = _lang["play_media"].format(
+                text = _lang[
+                    "play_media"
+                ].format(
                     media.url,
                     media.title,
                     media.duration,
@@ -527,6 +720,7 @@ class TgCall(PyTgCalls):
                     not media.is_live
                     and media.duration_sec
                 ):
+
                     import time as time_module
 
                     played = media.time
@@ -536,7 +730,8 @@ class TgCall(PyTgCalls):
 
                     percentage = (
                         min(
-                            (played / duration) * 100,
+                            (played / duration)
+                            * 100,
                             100,
                         )
                         if duration != 0
@@ -555,30 +750,49 @@ class TgCall(PyTgCalls):
                         "—" * filled
                         + "●"
                         + "—" * (
-                            bar_length - filled
+                            bar_length
+                            - filled
                         )
                     )
 
                     if duration >= 3600:
-                        played_time = time_module.strftime(
-                            "%H:%M:%S",
-                            time_module.gmtime(played),
+
+                        played_time = (
+                            time_module.strftime(
+                                "%H:%M:%S",
+                                time_module.gmtime(
+                                    played
+                                ),
+                            )
                         )
 
-                        total_time = time_module.strftime(
-                            "%H:%M:%S",
-                            time_module.gmtime(duration),
+                        total_time = (
+                            time_module.strftime(
+                                "%H:%M:%S",
+                                time_module.gmtime(
+                                    duration
+                                ),
+                            )
                         )
 
                     else:
-                        played_time = time_module.strftime(
-                            "%M:%S",
-                            time_module.gmtime(played),
+
+                        played_time = (
+                            time_module.strftime(
+                                "%M:%S",
+                                time_module.gmtime(
+                                    played
+                                ),
+                            )
                         )
 
-                        total_time = time_module.strftime(
-                            "%M:%S",
-                            time_module.gmtime(duration),
+                        total_time = (
+                            time_module.strftime(
+                                "%M:%S",
+                                time_module.gmtime(
+                                    duration
+                                ),
+                            )
                         )
 
                     timer_text = (
@@ -593,27 +807,34 @@ class TgCall(PyTgCalls):
                     )
 
                 else:
+
                     keyboard = buttons.controls(
                         chat_id
                     )
 
                 if message:
+
                     try:
                         await message.delete()
                     except Exception:
                         pass
 
-                sent_photo = await self._send_photo_with_retry(
-                    chat_id=target_chat_for_messages,
-                    photo=_thumb,
-                    caption=text,
-                    reply_markup=keyboard,
+                sent_photo = (
+                    await self._send_photo_with_retry(
+                        chat_id=target_chat_for_messages,
+                        photo=_thumb,
+                        caption=text,
+                        reply_markup=keyboard,
+                    )
                 )
 
                 if sent_photo:
-                    media.message_id = sent_photo.id
+                    media.message_id = (
+                        sent_photo.id
+                    )
 
                 try:
+
                     asyncio.create_task(
                         preload.start_preload(
                             chat_id,
@@ -622,33 +843,47 @@ class TgCall(PyTgCalls):
                     )
 
                 except Exception as e:
+
                     logger.debug(
-                        f"Error starting preload for {chat_id}: {e}"
+                        f"Error starting preload "
+                        f"for {chat_id}: {e}"
                     )
 
         except FileNotFoundError:
 
             if message:
+
                 try:
                     await message.edit_text(
-                        _lang["error_no_file"].format(
+                        _lang[
+                            "error_no_file"
+                        ].format(
                             config.SUPPORT_CHAT
                         )
                     )
+
                 except Exception:
                     pass
 
-            await self.play_next(chat_id)
+            await self.play_next(
+                chat_id
+            )
 
         except exceptions.NoActiveGroupCall:
 
-            await self.stop(chat_id)
+            await self.stop(
+                chat_id
+            )
 
             if message:
+
                 try:
                     await message.edit_text(
-                        _lang["error_vc_disabled"]
+                        _lang[
+                            "error_vc_disabled"
+                        ]
                     )
+
                 except Exception:
                     pass
 
@@ -667,131 +902,196 @@ class TgCall(PyTgCalls):
                 ]
             ):
 
-                await self.stop(chat_id)
+                await self.stop(
+                    chat_id
+                )
 
                 if message:
+
                     try:
                         await message.edit_text(
-                            _lang["error_vc_disabled"]
+                            _lang[
+                                "error_vc_disabled"
+                            ]
                         )
+
                     except Exception:
                         pass
 
             elif (
-                "GROUPCALL_INVALID" in error_str
-                or "GROUPCALL" in error_str
+                "GROUPCALL_INVALID"
+                in error_str
+                or "GROUPCALL"
+                in error_str
             ):
 
-                await self.stop(chat_id)
+                await self.stop(
+                    chat_id
+                )
 
                 if message:
+
                     try:
                         await message.edit_text(
-                            _lang["error_no_call"]
+                            _lang[
+                                "error_no_call"
+                            ]
                         )
+
                     except Exception:
                         pass
 
             else:
 
                 logger.error(
-                    f"RPC error in play_media for {chat_id}: {e}"
+                    f"RPC error in play_media "
+                    f"for {chat_id}: {e}"
                 )
 
-                await self.stop(chat_id)
+                await self.stop(
+                    chat_id
+                )
 
         except exceptions.NoAudioSourceFound:
 
             if message:
+
                 try:
                     await message.edit_text(
-                        _lang["error_no_audio"]
+                        _lang[
+                            "error_no_audio"
+                        ]
                     )
+
                 except Exception:
                     pass
 
-            await self.play_next(chat_id)
+            await self.play_next(
+                chat_id
+            )
 
         except (
             ConnectionNotFound,
             TelegramServerError,
         ):
 
-            await self.stop(chat_id)
+            await self.stop(
+                chat_id
+            )
 
             if message:
+
                 try:
                     await message.edit_text(
-                        _lang["error_tg_server"]
+                        _lang[
+                            "error_tg_server"
+                        ]
                     )
+
                 except Exception:
                     pass
 
         except TimeoutError as e:
 
             logger.warning(
-                f"⏱️ Timeout joining voice chat {chat_id}: {str(e)}"
+                f"⏱️ Timeout joining voice chat "
+                f"{chat_id}: {str(e)}"
             )
 
-            await self.stop(chat_id)
+            await self.stop(
+                chat_id
+            )
 
             if message:
+
                 try:
                     await message.edit_text(
                         "⏱️ <b>Connection timed out!</b>\n\n"
                         "<blockquote>Failed to join voice chat. "
-                        "Please check your network and try again.</blockquote>"
+                        "Please check your network and try again."
+                        "</blockquote>"
                     )
+
                 except Exception:
                     pass
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(
+                2
+            )
 
-            await self.play_next(chat_id)
+            await self.play_next(
+                chat_id
+            )
 
         except Exception as e:
 
             logger.error(
-                f"Unexpected error in play_media for {chat_id}: {e}",
+                f"Unexpected error in play_media "
+                f"for {chat_id}: {e}",
                 exc_info=True,
             )
 
-            await self.stop(chat_id)
+            await self.stop(
+                chat_id
+            )
 
             if message:
+
                 try:
                     await message.edit_text(
-                        f"❌ Playback error: {str(e)[:100]}"
+                        f"❌ Playback error: "
+                        f"{str(e)[:100]}"
                     )
+
                 except Exception:
                     pass
 
-    async def replay(self, chat_id: int) -> None:
+    async def replay(
+        self,
+        chat_id: int,
+    ) -> None:
 
         try:
 
-            if not await db.get_call(chat_id):
+            if not await db.get_call(
+                chat_id
+            ):
                 return
 
             message_chat_id = None
 
             try:
-                chat = await app.get_chat(chat_id)
 
-                if chat.type == enums.ChatType.CHANNEL:
-                    group_id = await db.get_group_for_channel(
-                        chat_id
+                chat = await app.get_chat(
+                    chat_id
+                )
+
+                if (
+                    chat.type
+                    == enums.ChatType.CHANNEL
+                ):
+
+                    group_id = (
+                        await db.get_group_for_channel(
+                            chat_id
+                        )
                     )
 
                     if group_id:
-                        message_chat_id = group_id
+                        message_chat_id = (
+                            group_id
+                        )
 
             except Exception:
                 pass
 
-            media = queue.get_current(chat_id)
+            media = queue.get_current(
+                chat_id
+            )
 
-            _lang = await lang.get_lang(chat_id)
+            _lang = await lang.get_lang(
+                chat_id
+            )
 
             target_chat = (
                 message_chat_id
@@ -801,7 +1101,9 @@ class TgCall(PyTgCalls):
 
             msg = await app.send_message(
                 chat_id=target_chat,
-                text=_lang["play_again"],
+                text=_lang[
+                    "play_again"
+                ],
             )
 
             await self.play_media(
@@ -812,8 +1114,10 @@ class TgCall(PyTgCalls):
             )
 
         except Exception as e:
+
             logger.error(
-                f"Error in replay for {chat_id}: {e}",
+                f"Error in replay for "
+                f"{chat_id}: {e}",
                 exc_info=True,
             )
 
@@ -825,30 +1129,52 @@ class TgCall(PyTgCalls):
 
         try:
 
-            if not await db.get_call(chat_id):
+            if not await db.get_call(
+                chat_id
+            ):
                 return False
 
-            media = queue.get_current(chat_id)
+            media = queue.get_current(
+                chat_id
+            )
 
-            if not media or media.is_live:
+            if (
+                not media
+                or media.is_live
+            ):
                 return False
 
-            client = await db.get_assistant(chat_id)
+            client = await db.get_assistant(
+                chat_id
+            )
 
-            _lang = await lang.get_lang(chat_id)
+            _lang = await lang.get_lang(
+                chat_id
+            )
 
             message_chat_id = None
 
             try:
-                chat = await app.get_chat(chat_id)
 
-                if chat.type == enums.ChatType.CHANNEL:
-                    group_id = await db.get_group_for_channel(
-                        chat_id
+                chat = await app.get_chat(
+                    chat_id
+                )
+
+                if (
+                    chat.type
+                    == enums.ChatType.CHANNEL
+                ):
+
+                    group_id = (
+                        await db.get_group_for_channel(
+                            chat_id
+                        )
                     )
 
                     if group_id:
-                        message_chat_id = group_id
+                        message_chat_id = (
+                            group_id
+                        )
 
             except Exception:
                 pass
@@ -862,6 +1188,7 @@ class TgCall(PyTgCalls):
             )
 
             try:
+
                 msg = await app.get_messages(
                     target_chat,
                     media.message_id,
@@ -871,13 +1198,16 @@ class TgCall(PyTgCalls):
                 msg = None
 
             if not msg:
+
                 _lang = await lang.get_lang(
                     chat_id
                 )
 
                 msg = await app.send_message(
                     chat_id=target_chat,
-                    text=_lang["seeking"],
+                    text=_lang[
+                        "seeking"
+                    ],
                 )
 
             await self.play_media(
@@ -893,7 +1223,8 @@ class TgCall(PyTgCalls):
         except Exception as e:
 
             logger.warning(
-                f"Seek stream failed for {chat_id}: {e}"
+                f"Seek stream failed "
+                f"for {chat_id}: {e}"
             )
 
             return False
@@ -903,10 +1234,18 @@ class TgCall(PyTgCalls):
         chat_id: int,
     ) -> None:
 
-        if chat_id not in self._play_next_locks:
-            self._play_next_locks[chat_id] = asyncio.Lock()
+        if (
+            chat_id
+            not in self._play_next_locks
+        ):
 
-        lock = self._play_next_locks[chat_id]
+            self._play_next_locks[
+                chat_id
+            ] = asyncio.Lock()
+
+        lock = self._play_next_locks[
+            chat_id
+        ]
 
         if lock.locked():
             return
@@ -915,24 +1254,38 @@ class TgCall(PyTgCalls):
 
             try:
 
-                if not await db.get_call(chat_id):
+                if not await db.get_call(
+                    chat_id
+                ):
                     return
 
+                # =================================================
                 # CHANNEL → LINKED GROUP
+                # =================================================
+
                 message_chat_id = None
 
                 try:
+
                     chat = await app.get_chat(
                         chat_id
                     )
 
-                    if chat.type == enums.ChatType.CHANNEL:
-                        group_id = await db.get_group_for_channel(
-                            chat_id
+                    if (
+                        chat.type
+                        == enums.ChatType.CHANNEL
+                    ):
+
+                        group_id = (
+                            await db.get_group_for_channel(
+                                chat_id
+                            )
                         )
 
                         if group_id:
-                            message_chat_id = group_id
+                            message_chat_id = (
+                                group_id
+                            )
 
                 except Exception:
                     pass
@@ -947,7 +1300,10 @@ class TgCall(PyTgCalls):
                     chat_id
                 )
 
+                # =================================================
                 # LOOP CURRENT SONG
+                # =================================================
+
                 if loop_mode == 1:
 
                     media = queue.get_current(
@@ -961,9 +1317,12 @@ class TgCall(PyTgCalls):
                         )
 
                         try:
+
                             msg = await app.send_message(
                                 chat_id=target_chat,
-                                text=_lang["play_again"],
+                                text=_lang[
+                                    "play_again"
+                                ],
                             )
 
                             await self.play_media(
@@ -979,6 +1338,7 @@ class TgCall(PyTgCalls):
                                 await self.leave_call(
                                     chat_id
                                 )
+
                             except Exception:
                                 pass
 
@@ -988,12 +1348,18 @@ class TgCall(PyTgCalls):
 
                         return
 
+                # =================================================
                 # LOOP WHOLE QUEUE
+                # =================================================
+
                 media = queue.get_next(
                     chat_id
                 )
 
-                if not media and loop_mode == 10:
+                if (
+                    not media
+                    and loop_mode == 10
+                ):
 
                     all_items = queue.get_all(
                         chat_id
@@ -1001,7 +1367,9 @@ class TgCall(PyTgCalls):
 
                     if all_items:
 
-                        first_track = all_items[0]
+                        first_track = (
+                            all_items[0]
+                        )
 
                         _lang = await lang.get_lang(
                             chat_id
@@ -1034,7 +1402,9 @@ class TgCall(PyTgCalls):
                                     )
                                 )
 
-                            first_track.message_id = msg.id
+                            first_track.message_id = (
+                                msg.id
+                            )
 
                             await self.play_media(
                                 chat_id,
@@ -1055,9 +1425,16 @@ class TgCall(PyTgCalls):
 
                         return
 
+                # =================================================
+                # DELETE OLD QUEUE MESSAGE
+                # =================================================
+
                 try:
 
-                    if media and media.message_id:
+                    if (
+                        media
+                        and media.message_id
+                    ):
 
                         await app.delete_messages(
                             chat_id=chat_id,
@@ -1073,10 +1450,13 @@ class TgCall(PyTgCalls):
                 # =====================================================
                 # 🤖 AUTOPLAY
                 # =====================================================
+
                 if not media:
 
-                    autoplay_enabled = await db.get_autoplay(
-                        chat_id
+                    autoplay_enabled = (
+                        await db.get_autoplay(
+                            chat_id
+                        )
                     )
 
                     if autoplay_enabled:
@@ -1084,49 +1464,75 @@ class TgCall(PyTgCalls):
                         try:
 
                             logger.info(
-                                f"🤖 Autoplay triggered for {chat_id}"
+                                f"🤖 Autoplay triggered "
+                                f"for {chat_id}"
                             )
 
-                            current_media = queue.get_current(
-                                chat_id
+                            # IMPORTANT:
+                            # Do NOT use queue.get_current()
+                            # here. The queue pointer can already
+                            # be at the end.
+                            current_media = (
+                                self._autoplay_current.get(
+                                    chat_id
+                                )
                             )
-
-                            search_query = None
 
                             if current_media:
+
                                 search_query = getattr(
                                     current_media,
                                     "title",
+                                    "",
+                                )
+
+                                search_query = (
+                                    search_query
+                                   .strip()
+                                )
+
+                                current_id = getattr(
+                                    current_media,
+                                    "id",
                                     None,
                                 )
 
-                            if search_query:
+                                if search_query:
 
-                                results = await yt.search(
-                                    search_query
-                                )
+                                    logger.info(
+                                        f"🤖 Autoplay searching: "
+                                        f"{search_query}"
+                                    )
 
-                                if results:
-
-                                    current_id = getattr(
-                                        current_media,
-                                        "id",
-                                        None,
+                                    results = (
+                                        await yt.search(
+                                            search_query
+                                        )
                                     )
 
                                     next_track = None
 
-                                    for track in results:
+                                    if results:
 
-                                        track_id = getattr(
-                                            track,
-                                            "id",
-                                            None,
-                                        )
+                                        for track in results:
 
-                                        if track_id != current_id:
-                                            next_track = track
-                                            break
+                                            track_id = getattr(
+                                                track,
+                                                "id",
+                                                None,
+                                            )
+
+                                            if (
+                                                track_id
+                                                and track_id
+                                                != current_id
+                                            ):
+
+                                                next_track = (
+                                                    track
+                                                )
+
+                                                break
 
                                     if next_track:
 
@@ -1136,24 +1542,52 @@ class TgCall(PyTgCalls):
                                         )
 
                                         logger.info(
-                                            "🤖 Autoplay added: "
+                                            "🤖 Autoplay selected: "
                                             f"{getattr(next_track, 'title', 'Unknown')}"
                                         )
 
-                                        media = queue.get_next(
-                                            chat_id
+                                        # IMPORTANT:
+                                        # The track was just selected.
+                                        # Do NOT call queue.get_next()
+                                        # because that can skip the track.
+                                        media = next_track
+
+                                    else:
+
+                                        logger.warning(
+                                            f"🤖 Autoplay found "
+                                            f"no different track "
+                                            f"for {chat_id}"
                                         )
+
+                                else:
+
+                                    logger.warning(
+                                        f"🤖 Autoplay has no "
+                                        f"search title for "
+                                        f"{chat_id}"
+                                    )
+
+                            else:
+
+                                logger.warning(
+                                    f"🤖 Autoplay has no "
+                                    f"current track for "
+                                    f"{chat_id}"
+                                )
 
                         except Exception as e:
 
                             logger.error(
-                                f"❌ Autoplay failed for {chat_id}: {e}",
+                                f"❌ Autoplay failed "
+                                f"for {chat_id}: {e}",
                                 exc_info=True,
                             )
 
                 # =====================================================
                 # QUEUE EMPTY + AUTOPLAY FAILED/OFF
                 # =====================================================
+
                 if not media:
 
                     if config.AUTO_END:
@@ -1186,7 +1620,10 @@ class TgCall(PyTgCalls):
 
                 msg = None
 
+                # =================================================
                 # DOWNLOAD NEXT TRACK
+                # =================================================
+
                 if not media.file_path:
 
                     is_live = getattr(
@@ -1195,14 +1632,16 @@ class TgCall(PyTgCalls):
                         False,
                     )
 
-                    media.file_path = await yt.download(
-                        media.id,
-                        is_live=is_live,
-                        video=getattr(
-                            media,
-                            "video",
-                            False,
-                        ),
+                    media.file_path = (
+                        await yt.download(
+                            media.id,
+                            is_live=is_live,
+                            video=getattr(
+                                media,
+                                "video",
+                                False,
+                            ),
+                        )
                     )
 
                     if not media.file_path:
@@ -1214,6 +1653,7 @@ class TgCall(PyTgCalls):
                         if msg:
 
                             try:
+
                                 await msg.edit_text(
                                     _lang[
                                         "error_no_file"
@@ -1227,11 +1667,17 @@ class TgCall(PyTgCalls):
 
                         return
 
+                # =================================================
+                # SEND PLAY NEXT MESSAGE
+                # =================================================
+
                 try:
 
                     msg = await app.send_message(
                         chat_id=target_chat,
-                        text=_lang["play_next"],
+                        text=_lang[
+                            "play_next"
+                        ],
                     )
 
                 except errors.FloodWait:
@@ -1293,18 +1739,23 @@ class TgCall(PyTgCalls):
             except Exception as e:
 
                 logger.error(
-                    f"Error in play_next for {chat_id}: {e}",
+                    f"Error in play_next "
+                    f"for {chat_id}: {e}",
                     exc_info=True,
                 )
 
                 try:
+
                     await self.stop(
                         chat_id
                     )
+
                 except Exception:
                     pass
 
-    async def ping(self) -> float:
+    async def ping(
+        self,
+    ) -> float:
 
         pings = [
             client.ping
@@ -1329,6 +1780,10 @@ class TgCall(PyTgCalls):
                 update: types.Update,
             ) -> None:
 
+                # =================================================
+                # STREAM ENDED
+                # =================================================
+
                 if isinstance(
                     update,
                     types.StreamEnded,
@@ -1339,13 +1794,18 @@ class TgCall(PyTgCalls):
                         == types.StreamEnded.Type.AUDIO
                     ):
 
-                        chat_id = update.chat_id
+                        chat_id = (
+                            update.chat_id
+                        )
 
                         current_time = (
                             asyncio.get_event_loop().time()
                         )
 
-                        if chat_id in self._stream_end_cache:
+                        if (
+                            chat_id
+                            in self._stream_end_cache
+                        ):
 
                             if (
                                 current_time
@@ -1354,6 +1814,7 @@ class TgCall(PyTgCalls):
                                 ]
                                 < 2.0
                             ):
+
                                 return
 
                         self._stream_end_cache[
@@ -1371,6 +1832,10 @@ class TgCall(PyTgCalls):
                             chat_id
                         )
 
+                # =================================================
+                # CHAT UPDATE
+                # =================================================
+
                 elif isinstance(
                     update,
                     types.ChatUpdate,
@@ -1386,7 +1851,9 @@ class TgCall(PyTgCalls):
                             update.chat_id
                         )
 
-    async def boot(self) -> None:
+    async def boot(
+        self,
+    ) -> None:
 
         PyTgCallsSession.notice_displayed = True
 
