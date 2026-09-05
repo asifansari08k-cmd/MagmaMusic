@@ -13,7 +13,9 @@ from Anysnap import config, logger, userbot
 # ============================================================
 
 class MongoBackgroundFilter(logging.Filter):
+
     def filter(self, record):
+
         msg = record.getMessage()
 
         return not (
@@ -37,6 +39,10 @@ logging.getLogger(
 )
 
 
+# ============================================================
+# MONGODB
+# ============================================================
+
 class MongoDB:
 
     # ========================================================
@@ -44,9 +50,6 @@ class MongoDB:
     # ========================================================
 
     def __init__(self):
-        """
-        Initialize MongoDB connection.
-        """
 
         self.mongo = AsyncMongoClient(
             config.MONGO_URL,
@@ -103,9 +106,6 @@ class MongoDB:
     # ========================================================
 
     async def connect(self) -> None:
-        """
-        Check MongoDB connection with retry logic.
-        """
 
         max_retries = 3
         retry_delay = 5
@@ -128,7 +128,6 @@ class MongoDB:
                     f"({time() - start:.2f}s)"
                 )
 
-                # Create indexes
                 await self.authdb.create_index(
                     "_id"
                 )
@@ -177,7 +176,9 @@ class MongoDB:
     # CLOSE
     # ========================================================
 
-    async def close(self) -> None:
+    async def close(
+        self,
+    ) -> None:
 
         await self.mongo.close()
 
@@ -194,7 +195,10 @@ class MongoDB:
         chat_id: int,
     ) -> bool:
 
-        return chat_id in self.active_calls
+        return (
+            chat_id
+            in self.active_calls
+        )
 
     async def add_call(
         self,
@@ -223,9 +227,6 @@ class MongoDB:
 
         if paused is not None:
 
-            # IMPORTANT:
-            # Keep chat in active_calls even
-            # when paused.
             self.active_calls[
                 chat_id
             ] = int(
@@ -774,19 +775,21 @@ class MongoDB:
         status: bool,
     ) -> None:
 
+        self.maintenance = bool(
+            status
+        )
+
         await self.cache.update_one(
             {
                 "_id": "maintenance"
             },
             {
                 "$set": {
-                    "status": status
+                    "status": self.maintenance
                 }
             },
             upsert=True,
         )
-
-        self.maintenance = status
 
     async def get_maintenance(
         self,
@@ -799,9 +802,11 @@ class MongoDB:
         )
 
         self.maintenance = (
-            doc.get(
-                "status",
-                False,
+            bool(
+                doc.get(
+                    "status",
+                    False,
+                )
             )
             if doc
             else False
@@ -817,13 +822,6 @@ class MongoDB:
         self,
     ) -> bool:
 
-        if hasattr(
-            self,
-            "vplay_enabled",
-        ):
-
-            return self.vplay_enabled
-
         doc = await self.cache.find_one(
             {
                 "_id": "vplay_toggle"
@@ -831,12 +829,16 @@ class MongoDB:
         )
 
         self.vplay_enabled = (
-            doc.get(
-                "enabled",
-                config.VIDEO_PLAY,
+            bool(
+                doc.get(
+                    "enabled",
+                    config.VIDEO_PLAY,
+                )
             )
             if doc
-            else config.VIDEO_PLAY
+            else bool(
+                config.VIDEO_PLAY
+            )
         )
 
         return self.vplay_enabled
@@ -846,7 +848,9 @@ class MongoDB:
         enabled: bool,
     ) -> None:
 
-        self.vplay_enabled = enabled
+        self.vplay_enabled = bool(
+            enabled
+        )
 
         await self.cache.update_one(
             {
@@ -854,7 +858,7 @@ class MongoDB:
             },
             {
                 "$set": {
-                    "enabled": enabled
+                    "enabled": self.vplay_enabled
                 }
             },
             upsert=True,
@@ -962,9 +966,12 @@ class MongoDB:
 
         if doc:
 
-            self.logger = doc[
-                "status"
-            ]
+            self.logger = bool(
+                doc.get(
+                    "status",
+                    False,
+                )
+            )
 
         return self.logger
 
@@ -973,7 +980,9 @@ class MongoDB:
         status: bool,
     ) -> None:
 
-        self.logger = status
+        self.logger = bool(
+            status
+        )
 
         await self.cache.update_one(
             {
@@ -981,7 +990,7 @@ class MongoDB:
             },
             {
                 "$set": {
-                    "status": status
+                    "status": self.logger
                 }
             },
             upsert=True,
@@ -1054,7 +1063,7 @@ class MongoDB:
             and str(
                 doc.get(
                     "_id",
-                    ""
+                    "",
                 )
             ).startswith(
                 "cplay_"
@@ -1096,9 +1105,11 @@ class MongoDB:
         )
 
         return (
-            doc.get(
-                "enabled",
-                False,
+            bool(
+                doc.get(
+                    "enabled",
+                    False,
+                )
             )
             if doc
             else False
@@ -1116,7 +1127,9 @@ class MongoDB:
             },
             {
                 "$set": {
-                    "enabled": bool(enabled)
+                    "enabled": bool(
+                        enabled
+                    )
                 }
             },
             upsert=True,
@@ -1131,28 +1144,39 @@ class MongoDB:
         chat_id: int,
     ) -> bool:
         """
-        Get autoplay status.
+        Return autoplay status for chat.
 
-        Default:
-        False
+        If no setting exists,
+        autoplay is OFF.
         """
 
-        doc = await self.cache.find_one(
-            {
-                "_id": f"autoplay_{chat_id}"
-            }
-        )
+        try:
 
-        if not doc:
+            doc = await self.cache.find_one(
+                {
+                    "_id": f"autoplay_{chat_id}"
+                }
+            )
+
+            if not doc:
+
+                return False
+
+            return bool(
+                doc.get(
+                    "enabled",
+                    False,
+                )
+            )
+
+        except Exception as e:
+
+            logger.error(
+                f"❌ Failed to get autoplay "
+                f"for {chat_id}: {e}"
+            )
 
             return False
-
-        return bool(
-            doc.get(
-                "enabled",
-                False,
-            )
-        )
 
     async def set_autoplay(
         self,
@@ -1161,21 +1185,48 @@ class MongoDB:
     ) -> None:
         """
         Enable / disable autoplay.
+
+        MongoDB document:
+
+        {
+            "_id": "autoplay_<chat_id>",
+            "enabled": true/false
+        }
         """
 
-        await self.cache.update_one(
-            {
-                "_id": f"autoplay_{chat_id}"
-            },
-            {
-                "$set": {
-                    "enabled": bool(
-                        enabled
-                    )
-                }
-            },
-            upsert=True,
+        enabled = bool(
+            enabled
         )
+
+        try:
+
+            await self.cache.update_one(
+                {
+                    "_id": f"autoplay_{chat_id}"
+                },
+                {
+                    "$set": {
+                        "enabled": enabled
+                    }
+                },
+                upsert=True,
+            )
+
+            logger.info(
+                f"🤖 Autoplay setting updated: "
+                f"chat={chat_id}, "
+                f"enabled={enabled}"
+            )
+
+        except Exception as e:
+
+            logger.error(
+                f"❌ Failed to set autoplay "
+                f"for {chat_id}: {e}",
+                exc_info=True,
+            )
+
+            raise
 
     # ========================================================
     # LOOP
@@ -1687,6 +1738,7 @@ class MongoDB:
             chat=True
         )
         await self.get_logger()
+        await self.get_maintenance()
         await self.get_vplay_enabled()
         await self.get_sudoers()
 
