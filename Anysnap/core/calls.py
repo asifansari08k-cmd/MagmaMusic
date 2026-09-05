@@ -1,2651 +1,651 @@
+import re
 import asyncio
-import logging
+from dataclasses import replace
+from typing import Union
 
-from ntgcalls import ConnectionNotFound, TelegramServerError
-from pyrogram import enums, errors
-from pyrogram.types import InputMediaPhoto, Message
-from pytgcalls import PyTgCalls, exceptions, types
-from pytgcalls.pytgcalls_session import PyTgCallsSession
+from pyrogram import enums, types
+from py_yt import VideosSearch, Playlist
 
-from Anysnap import (
-    app,
-    config,
-    db,
-    lang,
-    logger,
-    preload,
-    queue,
-    userbot,
-    yt,
-)
-from Anysnap.helpers import Media, Track, buttons, thumb
+from Anysnap import logger
+from Anysnap.helpers import Track, utils
+from Anysnap.core.downloader import download_audio, download_video
 
 
-# ============================================================
-# SUPPRESS HARMLESS PYTGCALLS ERRORS
-# ============================================================
-
-class PyTgCallsErrorFilter(logging.Filter):
-
-    def filter(self, record):
-
-        message = record.getMessage()
-
-        if "UpdateGroupCall" in message:
-            return False
-
-        if (
-            "Connection with chat id" in message
-            and "not found" in message
-        ):
-            return False
-
-        return True
-
-
-logging.getLogger(
-    "pyrogram.dispatcher"
-).addFilter(
-    PyTgCallsErrorFilter()
-)
-
-
-# ============================================================
-# TG CALL
-# ============================================================
-
-class TgCall(PyTgCalls):
-
+class YouTube:
     def __init__(self):
+        """Initialize Anysnap YouTube handler."""
+        self.base = "https://www.youtube.com/watch?v="
 
-        self.clients = []
-
-        # ----------------------------------------------------
-        # Prevent duplicate play_next calls
-        # ----------------------------------------------------
-
-        self._play_next_locks = {}
-
-        # ----------------------------------------------------
-        # Prevent duplicate StreamEnded events
-        # ----------------------------------------------------
-
-        self._stream_end_cache = {}
-
-        # ----------------------------------------------------
-        # Store currently playing media for autoplay
-        # ----------------------------------------------------
-
-        self._autoplay_current = {}
-
-    # ========================================================
-    # AUTOPLAY STATUS RESOLVER
-    # ========================================================
-
-    async def _get_autoplay_status(
-        self,
-        chat_id: int,
-    ) -> bool:
-
-        # ----------------------------------------------------
-        # 1. Direct chat ID
-        # ----------------------------------------------------
-
-        try:
-
-            enabled = await db.get_autoplay(
-                chat_id
-            )
-
-            if enabled:
-
-                logger.info(
-                    f"🤖 Autoplay enabled directly: "
-                    f"chat={chat_id}"
-                )
-
-                return True
-
-        except Exception as e:
-
-            logger.warning(
-                f"Autoplay direct check failed "
-                f"for {chat_id}: {e}"
-            )
-
-        # ----------------------------------------------------
-        # 2. Channel → linked group
-        # ----------------------------------------------------
-
-        try:
-
-            chat = await app.get_chat(
-                chat_id
-            )
-
-            if (
-                chat.type
-                == enums.ChatType.CHANNEL
-            ):
-
-                group_id = (
-                    await db.get_group_for_channel(
-                        chat_id
-                    )
-                )
-
-                if group_id:
-
-                    enabled = await db.get_autoplay(
-                        group_id
-                    )
-
-                    if enabled:
-
-                        logger.info(
-                            f"🤖 Autoplay enabled "
-                            f"via linked group: "
-                            f"group={group_id}, "
-                            f"channel={chat_id}"
-                        )
-
-                        return True
-
-        except Exception as e:
-
-            logger.debug(
-                f"Channel autoplay mapping "
-                f"failed for {chat_id}: {e}"
-            )
-
-        # ----------------------------------------------------
-        # 3. Group → linked channel
-        # ----------------------------------------------------
-
-        try:
-
-            channel_id = await db.get_cmode(
-                chat_id
-            )
-
-            if channel_id:
-
-                enabled = await db.get_autoplay(
-                    channel_id
-                )
-
-                if enabled:
-
-                    logger.info(
-                        f"🤖 Autoplay enabled "
-                        f"via linked channel: "
-                        f"group={chat_id}, "
-                        f"channel={channel_id}"
-                    )
-
-                    return True
-
-        except Exception as e:
-
-            logger.debug(
-                f"Linked channel autoplay "
-                f"check failed for {chat_id}: {e}"
-            )
-
-        # ----------------------------------------------------
-        # 4. Disabled
-        # ----------------------------------------------------
-
-        logger.info(
-            f"🤖 Autoplay disabled: "
-            f"chat={chat_id}"
+        self.regex = re.compile(
+            r"(https?://)?(www\.|m\.|music\.)?"
+            r"(youtube\.com/(watch\?v=|shorts/|live/|embed/|playlist\?list=)|youtu\.be/)"
+            r"([A-Za-z0-9_-]{11}|PL[A-Za-z0-9_-]+)([&?][^\s]*)?"
         )
 
-        return False
+        self.search_cache = {}
+
+        logger.info("=" * 50)
+        logger.info("📹 Anysnap YouTube Handler Initialized")
+        logger.info("⚡ Mode: Direct yt-dlp Downloader")
+        logger.info("=" * 50)
 
     # ========================================================
-    # AUTOPLAY CURRENT TRACK RESOLVER
+    # VALIDATE YOUTUBE URL
     # ========================================================
 
-    async def _get_autoplay_current(
+    def valid(self, url: str) -> bool:
+        """Check if URL is a valid YouTube URL."""
+        return bool(re.match(self.regex, url))
+
+    # ========================================================
+    # EXTRACT YOUTUBE URL
+    # ========================================================
+
+    def url(
         self,
-        chat_id: int,
-    ):
+        message_1: types.Message,
+    ) -> Union[str, None]:
 
-        # ----------------------------------------------------
-        # 1. Direct
-        # ----------------------------------------------------
+        """Extract YouTube URL from message."""
 
-        media = self._autoplay_current.get(
-            chat_id
-        )
+        messages = [message_1]
+        link = None
 
-        if media:
-
-            return media
-
-        # ----------------------------------------------------
-        # 2. Channel → linked group
-        # ----------------------------------------------------
-
-        try:
-
-            chat = await app.get_chat(
-                chat_id
+        if message_1.reply_to_message:
+            messages.append(
+                message_1.reply_to_message
             )
 
-            if (
-                chat.type
-                == enums.ChatType.CHANNEL
-            ):
+        for message in messages:
 
-                group_id = (
-                    await db.get_group_for_channel(
-                        chat_id
-                    )
-                )
-
-                if group_id:
-
-                    media = (
-                        self._autoplay_current.get(
-                            group_id
-                        )
-                    )
-
-                    if media:
-
-                        return media
-
-        except Exception as e:
-
-            logger.debug(
-                f"Failed channel autoplay "
-                f"track mapping for {chat_id}: {e}"
+            text = (
+                message.text
+                or message.caption
+                or ""
             )
 
-        # ----------------------------------------------------
-        # 3. Group → linked channel
-        # ----------------------------------------------------
+            if message.entities:
 
-        try:
+                for entity in message.entities:
 
-            channel_id = await db.get_cmode(
-                chat_id
-            )
+                    if (
+                        entity.type
+                        == enums.MessageEntityType.URL
+                    ):
 
-            if channel_id:
+                        link = text[
+                            entity.offset:
+                            entity.offset + entity.length
+                        ]
 
-                media = (
-                    self._autoplay_current.get(
-                        channel_id
-                    )
-                )
+                        break
 
-                if media:
+            if message.caption_entities:
 
-                    return media
+                for entity in message.caption_entities:
 
-        except Exception as e:
+                    if (
+                        entity.type
+                        == enums.MessageEntityType.TEXT_LINK
+                    ):
 
-            logger.debug(
-                f"Failed linked channel autoplay "
-                f"track mapping for {chat_id}: {e}"
+                        link = entity.url
+
+                        break
+
+        if link:
+
+            return (
+                link
+                .split("&si")[0]
+                .split("?si")[0]
             )
 
         return None
 
     # ========================================================
-    # EDIT MEDIA WITH RETRY
+    # NORMAL SEARCH
     # ========================================================
 
-    async def _edit_media_with_retry(
+    async def search(
         self,
-        message: Message,
-        media_obj: InputMediaPhoto,
-        reply_markup,
-    ):
+        query: str,
+        m_id: int,
+    ) -> Track | None:
 
-        try:
+        """
+        Normal YouTube search.
 
-            return await message.edit_media(
-                media=media_obj,
-                reply_markup=reply_markup,
-            )
+        Used by normal /play command.
+        Returns only the first/best result.
+        """
 
-        except errors.FloodWait as fw:
-
-            await asyncio.sleep(
-                fw.value + 1
-            )
-
-            try:
-
-                return await message.edit_media(
-                    media=media_obj,
-                    reply_markup=reply_markup,
-                )
-
-            except Exception:
-
-                return None
-
-        except errors.MessageNotModified:
-
-            return None
-
-        except Exception:
-
-            return None
-
-    # ========================================================
-    # SEND PHOTO WITH RETRY
-    # ========================================================
-
-    async def _send_photo_with_retry(
-        self,
-        chat_id: int,
-        photo,
-        caption: str,
-        reply_markup,
-    ):
-
-        try:
-
-            return await app.send_photo(
-                chat_id=chat_id,
-                photo=photo,
-                caption=caption,
-                reply_markup=reply_markup,
-            )
-
-        except errors.FloodWait as fw:
-
-            await asyncio.sleep(
-                fw.value + 1
-            )
-
-            try:
-
-                return await app.send_photo(
-                    chat_id=chat_id,
-                    photo=photo,
-                    caption=caption,
-                    reply_markup=reply_markup,
-                )
-
-            except Exception:
-
-                return None
-
-        except Exception:
-
-            return None
-
-    # ========================================================
-    # PAUSE
-    # ========================================================
-
-    async def pause(
-        self,
-        chat_id: int,
-    ) -> bool:
-
-        client = await db.get_assistant(
-            chat_id
-        )
-
-        try:
-
-            await client.pause(
-                chat_id
-            )
-
-            await db.playing(
-                chat_id,
-                paused=True,
-            )
-
-            return True
-
-        except (
-            ConnectionNotFound,
-            exceptions.NotInCallError,
-        ):
-
-            await db.playing(
-                chat_id,
-                paused=False,
-            )
-
-            await db.remove_call(
-                chat_id
-            )
-
-            queue.clear(
-                chat_id
-            )
-
-            logger.warning(
-                f"Pause requested but assistant "
-                f"not in call for {chat_id}, syncing state"
-            )
-
-            return False
-
-        except Exception as e:
-
-            await db.playing(
-                chat_id,
-                paused=False,
-            )
-
-            logger.error(
-                f"Pause failed for {chat_id}: {e}"
-            )
-
-            return False
-
-    # ========================================================
-    # RESUME
-    # ========================================================
-
-    async def resume(
-        self,
-        chat_id: int,
-    ) -> bool:
-
-        client = await db.get_assistant(
-            chat_id
-        )
-
-        try:
-
-            await client.resume(
-                chat_id
-            )
-
-            await db.playing(
-                chat_id,
-                paused=False,
-            )
-
-            return True
-
-        except (
-            ConnectionNotFound,
-            exceptions.NotInCallError,
-        ):
-
-            await db.playing(
-                chat_id,
-                paused=False,
-            )
-
-            await db.remove_call(
-                chat_id
-            )
-
-            queue.clear(
-                chat_id
-            )
-
-            logger.warning(
-                f"Resume requested but assistant "
-                f"not in call for {chat_id}, syncing state"
-            )
-
-            return False
-
-        except Exception as e:
-
-            logger.error(
-                f"Resume failed for {chat_id}: {e}"
-            )
-
-            return False
-
-    # ========================================================
-    # STOP
-    # ========================================================
-
-    async def stop(
-        self,
-        chat_id: int,
-    ) -> None:
-
-        client = await db.get_assistant(
-            chat_id
+        cache_key = query
+        current_time = (
+            asyncio.get_running_loop().time()
         )
 
         # ----------------------------------------------------
-        # Cancel preload
+        # CACHE
         # ----------------------------------------------------
 
-        try:
+        if cache_key in self.search_cache:
 
-            await preload.cancel_preload(
-                chat_id
-            )
-
-        except Exception as e:
-
-            logger.debug(
-                f"Error cancelling preload "
-                f"for {chat_id}: {e}"
-            )
-
-        # ----------------------------------------------------
-        # Clear queue and call
-        # ----------------------------------------------------
-
-        try:
-
-            queue.clear(
-                chat_id
-            )
-
-            await db.remove_call(
-                chat_id
-            )
-
-        except Exception as e:
-
-            logger.warning(
-                f"Error clearing queue/call "
-                f"for {chat_id}: {e}"
-            )
-
-        # ----------------------------------------------------
-        # Clear direct autoplay state
-        # ----------------------------------------------------
-
-        self._autoplay_current.pop(
-            chat_id,
-            None,
-        )
-
-        # ----------------------------------------------------
-        # Clear mapped autoplay state
-        # ----------------------------------------------------
-
-        try:
-
-            chat = await app.get_chat(
-                chat_id
+            cached_result, cache_timestamp = (
+                self.search_cache[cache_key]
             )
 
             if (
-                chat.type
-                == enums.ChatType.CHANNEL
+                current_time - cache_timestamp
+                < 600
             ):
 
-                group_id = (
-                    await db.get_group_for_channel(
-                        chat_id
-                    )
+                fresh = replace(
+                    cached_result
                 )
 
-                if group_id:
+                fresh.message_id = m_id
+                fresh.file_path = None
+                fresh.user = None
+                fresh.time = 0
+                fresh.video = False
 
-                    self._autoplay_current.pop(
-                        group_id,
-                        None,
-                    )
-
-            else:
-
-                channel_id = await db.get_cmode(
-                    chat_id
-                )
-
-                if channel_id:
-
-                    self._autoplay_current.pop(
-                        channel_id,
-                        None,
-                    )
-
-        except Exception:
-
-            pass
+                return fresh
 
         # ----------------------------------------------------
-        # Leave voice chat
+        # SEARCH
         # ----------------------------------------------------
 
         try:
 
-            await client.leave_call(
-                chat_id,
-                close=False,
+            _search = VideosSearch(
+                query,
+                limit=1,
             )
 
-            await asyncio.sleep(
-                0.5
-            )
+            results = await _search.next()
 
-        except (
-            ConnectionNotFound,
-            exceptions.NotInCallError,
-        ):
+            if (
+                results
+                and results.get("result")
+            ):
 
-            pass
+                data = results["result"][0]
+
+                duration = data.get(
+                    "duration"
+                )
+
+                is_live = (
+                    duration is None
+                    or duration == "LIVE"
+                )
+
+                track = Track(
+                    id=data.get("id"),
+
+                    channel_name=data.get(
+                        "channel",
+                        {},
+                    ).get(
+                        "name"
+                    ),
+
+                    duration=(
+                        duration
+                        if not is_live
+                        else "LIVE"
+                    ),
+
+                    duration_sec=(
+                        0
+                        if is_live
+                        else utils.to_seconds(
+                            duration
+                        )
+                    ),
+
+                    message_id=m_id,
+
+                    title=data.get(
+                        "title",
+                        "",
+                    )[:25],
+
+                    thumbnail=(
+                        data.get(
+                            "thumbnails",
+                            [{}],
+                        )[-1]
+                        .get(
+                            "url",
+                            "",
+                        )
+                        .split("?")[0]
+                    ),
+
+                    url=data.get(
+                        "link"
+                    ),
+
+                    view_count=data.get(
+                        "viewCount",
+                        {},
+                    ).get(
+                        "short"
+                    ),
+
+                    is_live=is_live,
+                )
+
+                # ------------------------------------------------
+                # SAVE CACHE
+                # ------------------------------------------------
+
+                self.search_cache[
+                    cache_key
+                ] = (
+                    track,
+                    current_time,
+                )
+
+                # ------------------------------------------------
+                # LIMIT CACHE
+                # ------------------------------------------------
+
+                if len(
+                    self.search_cache
+                ) > 100:
+
+                    oldest_key = min(
+                        self.search_cache.keys(),
+                        key=lambda k:
+                        self.search_cache[k][1],
+                    )
+
+                    del self.search_cache[
+                        oldest_key
+                    ]
+
+                return replace(
+                    track
+                )
 
         except Exception as e:
 
-            error_msg = str(e).lower()
+            logger.warning(
+                f"⚠️ Search failed for "
+                f"'{query}': {e}"
+            )
 
-            ignored_errors = [
-                "not in a call",
-                "not in the group call",
-                "groupcall_forbidden",
-                "no active group call",
-                "call was already stopped",
-                "call already disconnected",
-            ]
+        return None
 
-            if not any(
-                ignore in error_msg
-                for ignore in ignored_errors
-            ):
+    # ========================================================
+    # AUTOPLAY SEARCH
+    # ========================================================
+
+    async def search_all(
+        self,
+        query: str,
+        m_id: int = 0,
+        limit: int = 5,
+    ) -> list[Track]:
+
+        """
+        Search multiple YouTube results.
+
+        Used ONLY by autoplay.
+
+        Returns up to 5 different search results.
+        """
+
+        try:
+
+            logger.info(
+                f"🔎 YouTube multi-search: "
+                f"query={query}, limit={limit}"
+            )
+
+            _search = VideosSearch(
+                query,
+                limit=limit,
+            )
+
+            results = await _search.next()
+
+            if not results:
 
                 logger.warning(
-                    f"Error leaving call "
-                    f"for {chat_id}: {e}"
+                    f"⚠️ No search response "
+                    f"for '{query}'"
                 )
 
-    # ========================================================
-    # PLAY MEDIA
-    # ========================================================
+                return []
 
-    async def play_media(
-        self,
-        chat_id: int,
-        message: Message | None,
-        media: Media | Track,
-        seek_time: int = 0,
-        message_chat_id: int = None,
-    ) -> None:
-
-        client = await db.get_assistant(
-            chat_id
-        )
-
-        _lang = await lang.get_lang(
-            chat_id
-        )
-
-        target_chat_for_messages = (
-            message_chat_id
-            if message_chat_id
-            else chat_id
-        )
-
-        # ----------------------------------------------------
-        # Thumbnail
-        # ----------------------------------------------------
-
-        if (
-            config.THUMB_GEN
-            and isinstance(media, Track)
-        ):
-
-            _thumb = await thumb.generate(
-                media
+            raw_results = results.get(
+                "result",
+                [],
             )
 
-        else:
+            if not raw_results:
 
-            _thumb = config.DEFAULT_THUMB
-
-        # ----------------------------------------------------
-        # File check
-        # ----------------------------------------------------
-
-        if not media.file_path:
-
-            if message:
-
-                return await message.edit_text(
-                    _lang[
-                        "error_no_file"
-                    ].format(
-                        config.SUPPORT_CHAT
-                    )
+                logger.warning(
+                    f"⚠️ No search results "
+                    f"for '{query}'"
                 )
 
-            logger.error(
-                f"No file path for media "
-                f"in {chat_id}"
-            )
+                return []
 
-            return
+            tracks = []
 
-        # ====================================================
-        # CHAT VALIDATION
-        # ====================================================
-
-        try:
-
-            chat = await app.get_chat(
-                chat_id
-            )
-
-            if chat.type not in [
-                enums.ChatType.SUPERGROUP,
-                enums.ChatType.GROUP,
-                enums.ChatType.CHANNEL,
-            ]:
-
-                logger.error(
-                    f"Invalid chat type for "
-                    f"{chat_id}: {chat.type}"
-                )
-
-                if message:
-
-                    await message.edit_text(
-                        "❌ Can only play in groups/channels."
-                    )
-
-                return
-
-            # ------------------------------------------------
-            # CHANNEL SUPPORT
-            # ------------------------------------------------
-
-            if chat.type == enums.ChatType.CHANNEL:
-
-                userbot_client = await db.get_client(
-                    chat_id
-                )
-
-                if not userbot_client:
-
-                    logger.error(
-                        f"No userbot client available "
-                        f"for {chat_id}"
-                    )
-
-                    if message:
-
-                        await message.edit_text(
-                            "❌ No assistant available."
-                        )
-
-                    return
+            for data in raw_results:
 
                 try:
 
-                    assistant_member = (
-                        await app.get_chat_member(
-                            chat_id,
-                            userbot_client.me.id,
-                        )
+                    video_id = data.get(
+                        "id"
                     )
 
-                    if (
-                        assistant_member.status
-                        == enums.ChatMemberStatus.BANNED
-                    ):
+                    if not video_id:
 
-                        logger.error(
-                            f"Assistant banned in "
-                            f"channel {chat_id}"
-                        )
+                        continue
 
-                        await db.set_cmode(
-                            chat_id,
-                            None,
-                        )
-
-                        if message:
-
-                            await message.edit_text(
-                                "❌ Assistant is banned in this channel."
-                            )
-
-                        return
-
-                except errors.RPCError as e:
-
-                    error_text = str(e)
-
-                    if (
-                        "CHANNEL_INVALID"
-                        in error_text
-                        or "USER_NOT_PARTICIPANT"
-                        in error_text
-                    ):
-
-                        logger.error(
-                            f"Assistant not in channel "
-                            f"{chat_id}: {e}"
-                        )
-
-                        if message:
-
-                            username = getattr(
-                                userbot_client.me,
-                                "username",
-                                None,
-                            )
-
-                            username_text = (
-                                f"@{username}"
-                                if username
-                                else "assistant"
-                            )
-
-                            await message.edit_text(
-                                "❌ <b>Assistant not in channel!</b>\n\n"
-                                f"<blockquote>Please add "
-                                f"{username_text} "
-                                "to the channel as admin with "
-                                "voice chat permissions.</blockquote>"
-                            )
-
-                        await db.set_cmode(
-                            chat_id,
-                            None,
-                        )
-
-                        return
-
-        except errors.RPCError as e:
-
-            if "CHANNEL_INVALID" in str(e):
-
-                logger.error(
-                    f"Invalid channel "
-                    f"{chat_id}: {e}"
-                )
-
-                if message:
-
-                    await message.edit_text(
-                        "❌ Invalid channel. "
-                        "Disabling channel play."
+                    duration = data.get(
+                        "duration"
                     )
 
-                await db.set_cmode(
-                    chat_id,
-                    None,
-                )
+                    is_live = (
+                        duration is None
+                        or duration == "LIVE"
+                    )
 
-                return
+                    thumbnails = data.get(
+                        "thumbnails",
+                        [],
+                    )
 
-            raise
+                    thumbnail_url = ""
 
-        # ====================================================
-        # FFMPEG PARAMETERS
-        # ====================================================
+                    if thumbnails:
 
-        if seek_time > 1:
+                        thumbnail_url = (
+                            thumbnails[-1]
+                            .get(
+                                "url",
+                                "",
+                            )
+                            .split("?")[0]
+                        )
 
-            ffmpeg_params = (
-                f"-ss {seek_time} "
-                "-probesize 10M "
-                "-analyzeduration 5M "
-                "-rtbufsize 5M "
-                "-fflags +genpts+igndts"
+                    track = Track(
+                        id=video_id,
+
+                        channel_name=data.get(
+                            "channel",
+                            {},
+                        ).get(
+                            "name",
+                            "",
+                        ),
+
+                        duration=(
+                            duration
+                            if not is_live
+                            else "LIVE"
+                        ),
+
+                        duration_sec=(
+                            0
+                            if is_live
+                            else utils.to_seconds(
+                                duration
+                            )
+                        ),
+
+                        message_id=m_id,
+
+                        title=data.get(
+                            "title",
+                            "Unknown",
+                        )[:25],
+
+                        thumbnail=thumbnail_url,
+
+                        url=data.get(
+                            "link",
+                            self.base + video_id,
+                        ),
+
+                        view_count=data.get(
+                            "viewCount",
+                            {},
+                        ).get(
+                            "short",
+                            "",
+                        ),
+
+                        is_live=is_live,
+
+                    )
+
+                    track.file_path = None
+                    track.time = 0
+                    track.video = False
+
+                    tracks.append(
+                        track
+                    )
+
+                except Exception as e:
+
+                    logger.debug(
+                        f"Skipping invalid "
+                        f"search result: {e}"
+                    )
+
+                    continue
+
+            logger.info(
+                f"🔎 YouTube multi-search "
+                f"returned {len(tracks)} results"
             )
 
-        else:
-
-            ffmpeg_params = (
-                "-probesize 10M "
-                "-analyzeduration 5M "
-                "-rtbufsize 5M "
-                "-fflags +genpts+igndts "
-                "-sync ext"
-            )
-
-        # ====================================================
-        # VIDEO / AUDIO
-        # ====================================================
-
-        is_video = getattr(
-            media,
-            "video",
-            False,
-        )
-
-        video_flags = (
-            types.MediaStream.Flags.AUTO_DETECT
-            if is_video
-            else types.MediaStream.Flags.IGNORE
-        )
-
-        stream = types.MediaStream(
-            media_path=media.file_path,
-            audio_parameters=types.AudioQuality.STUDIO,
-            audio_flags=types.MediaStream.Flags.REQUIRED,
-            video_flags=video_flags,
-            ffmpeg_parameters=ffmpeg_params,
-        )
-
-        # ====================================================
-        # CHECK EXISTING CALL
-        # ====================================================
-
-        try:
-
-            call = await client.get_call(
-                chat_id
-            )
-
-            if call:
-
-                logger.debug(
-                    f"Already connected to {chat_id}, "
-                    "leaving before reconnecting..."
-                )
-
-                await client.leave_call(
-                    chat_id,
-                    close=False,
-                )
-
-        except (
-            ConnectionNotFound,
-            exceptions.NotInCallError,
-        ):
-
-            pass
+            return tracks
 
         except Exception as e:
-
-            logger.debug(
-                f"Error checking connection state "
-                f"for {chat_id}: {e}"
-            )
-
-        # ====================================================
-        # PLAY RETRIES
-        # ====================================================
-
-        max_retries = 3
-        retry_delay = 1
-
-        try:
-
-            for attempt in range(
-                max_retries
-            ):
-
-                try:
-
-                    await client.play(
-                        chat_id=chat_id,
-                        stream=stream,
-                        config=types.GroupCallConfig(
-                            auto_start=True
-                        ),
-                    )
-
-                    break
-
-                except (
-                    exceptions.NoActiveGroupCall,
-                    errors.RPCError,
-                ) as e:
-
-                    error_msg = str(e)
-
-                    if (
-                        "GROUPCALL_INVALID"
-                        in error_msg
-                        or "GROUPCALL"
-                        in error_msg
-                        or isinstance(
-                            e,
-                            exceptions.NoActiveGroupCall,
-                        )
-                    ):
-
-                        if (
-                            attempt
-                            < max_retries - 1
-                        ):
-
-                            logger.debug(
-                                f"Group call transitioning "
-                                f"for {chat_id}, "
-                                f"retrying in "
-                                f"{retry_delay}s..."
-                            )
-
-                            await asyncio.sleep(
-                                retry_delay
-                            )
-
-                            continue
-
-                        raise
-
-                    raise
-
-                except Exception as e:
-
-                    error_msg = str(e).lower()
-
-                    if (
-                        "cannot be initialized more than once"
-                        in error_msg
-                        or "connection"
-                        in error_msg
-                    ):
-
-                        if (
-                            attempt
-                            < max_retries - 1
-                        ):
-
-                            logger.debug(
-                                f"Connection error "
-                                f"for {chat_id}, "
-                                "leaving and retrying..."
-                            )
-
-                            try:
-
-                                await client.leave_call(
-                                    chat_id,
-                                    close=False,
-                                )
-
-                                await asyncio.sleep(
-                                    retry_delay
-                                )
-
-                            except Exception:
-
-                                pass
-
-                            continue
-
-                        raise
-
-                    raise
-
-            # =================================================
-            # SET MEDIA TIME
-            # =================================================
-
-            if seek_time:
-
-                media.time = seek_time
-
-            else:
-
-                media.time = 1
-
-            # =================================================
-            # NORMAL PLAYBACK
-            # =================================================
-
-            if not seek_time:
-
-                # ------------------------------------------------
-                # Mark call active
-                # ------------------------------------------------
-
-                await db.add_call(
-                    chat_id
-                )
-
-                # ------------------------------------------------
-                # Save current track
-                # ------------------------------------------------
-
-                self._autoplay_current[
-                    chat_id
-                ] = media
-
-                logger.info(
-                    f"🤖 Autoplay current track: "
-                    f"{getattr(media, 'title', 'Unknown')}"
-                )
-
-                # ------------------------------------------------
-                # Save under linked chat ID
-                # ------------------------------------------------
-
-                try:
-
-                    chat_obj = await app.get_chat(
-                        chat_id
-                    )
-
-                    if (
-                        chat_obj.type
-                        == enums.ChatType.CHANNEL
-                    ):
-
-                        group_id = (
-                            await db.get_group_for_channel(
-                                chat_id
-                            )
-                        )
-
-                        if group_id:
-
-                            self._autoplay_current[
-                                group_id
-                            ] = media
-
-                    else:
-
-                        channel_id = await db.get_cmode(
-                            chat_id
-                        )
-
-                        if channel_id:
-
-                            self._autoplay_current[
-                                channel_id
-                            ] = media
-
-                except Exception as e:
-
-                    logger.debug(
-                        f"Could not map autoplay "
-                        f"current track for {chat_id}: {e}"
-                    )
-
-                # =================================================
-                # PLAYING MESSAGE
-                # =================================================
-
-                owner_name = getattr(
-                    config,
-                    "OWNER_NAME",
-                    config.BOT_NAME,
-                )
-
-                owner_link = getattr(
-                    config,
-                    "OWNER_LINK",
-                    "https://t.me/ANYSNAP",
-                )
-
-                text = _lang[
-                    "play_media"
-                ].format(
-                    media.url,
-                    media.title,
-                    media.duration,
-                    media.user,
-                    owner_name,
-                    owner_link,
-                )
-
-                # =================================================
-                # PROGRESS BAR
-                # =================================================
-
-                if (
-                    not media.is_live
-                    and media.duration_sec
-                ):
-
-                    import time as time_module
-
-                    played = media.time
-                    duration = media.duration_sec
-
-                    bar_length = 12
-
-                    percentage = (
-                        min(
-                            (played / duration) * 100,
-                            100,
-                        )
-                        if duration != 0
-                        else 0
-                    )
-
-                    filled = int(
-                        round(
-                            bar_length
-                            * percentage
-                            / 100
-                        )
-                    )
-
-                    timer_bar = (
-                        "—" * filled
-                        + "●"
-                        + "—" * (
-                            bar_length
-                            - filled
-                        )
-                    )
-
-                    if duration >= 3600:
-
-                        played_time = (
-                            time_module.strftime(
-                                "%H:%M:%S",
-                                time_module.gmtime(
-                                    played
-                                ),
-                            )
-                        )
-
-                        total_time = (
-                            time_module.strftime(
-                                "%H:%M:%S",
-                                time_module.gmtime(
-                                    duration
-                                ),
-                            )
-                        )
-
-                    else:
-
-                        played_time = (
-                            time_module.strftime(
-                                "%M:%S",
-                                time_module.gmtime(
-                                    played
-                                ),
-                            )
-                        )
-
-                        total_time = (
-                            time_module.strftime(
-                                "%M:%S",
-                                time_module.gmtime(
-                                    duration
-                                ),
-                            )
-                        )
-
-                    timer_text = (
-                        f"{played_time} "
-                        f"{timer_bar} "
-                        f"{total_time}"
-                    )
-
-                    keyboard = buttons.controls(
-                        chat_id,
-                        timer=timer_text,
-                    )
-
-                else:
-
-                    keyboard = buttons.controls(
-                        chat_id
-                    )
-
-                # =================================================
-                # DELETE REQUEST MESSAGE
-                # =================================================
-
-                if message:
-
-                    try:
-
-                        await message.delete()
-
-                    except Exception:
-
-                        pass
-
-                # =================================================
-                # SEND PLAYING MESSAGE
-                # =================================================
-
-                sent_photo = (
-                    await self._send_photo_with_retry(
-                        chat_id=target_chat_for_messages,
-                        photo=_thumb,
-                        caption=text,
-                        reply_markup=keyboard,
-                    )
-                )
-
-                if sent_photo:
-
-                    media.message_id = (
-                        sent_photo.id
-                    )
-
-                # =================================================
-                # PRELOAD
-                # =================================================
-
-                try:
-
-                    asyncio.create_task(
-                        preload.start_preload(
-                            chat_id,
-                            count=2,
-                        )
-                    )
-
-                except Exception as e:
-
-                    logger.debug(
-                        f"Error starting preload "
-                        f"for {chat_id}: {e}"
-                    )
-
-        # ====================================================
-        # FILE NOT FOUND
-        # ====================================================
-
-        except FileNotFoundError:
-
-            if message:
-
-                try:
-
-                    await message.edit_text(
-                        _lang[
-                            "error_no_file"
-                        ].format(
-                            config.SUPPORT_CHAT
-                        )
-                    )
-
-                except Exception:
-
-                    pass
-
-            await self.play_next(
-                chat_id
-            )
-
-        # ====================================================
-        # NO ACTIVE GROUP CALL
-        # ====================================================
-
-        except exceptions.NoActiveGroupCall:
-
-            await self.stop(
-                chat_id
-            )
-
-            if message:
-
-                try:
-
-                    await message.edit_text(
-                        _lang[
-                            "error_vc_disabled"
-                        ]
-                    )
-
-                except Exception:
-
-                    pass
-
-        # ====================================================
-        # RPC ERROR
-        # ====================================================
-
-        except errors.RPCError as e:
-
-            error_str = str(e)
-
-            if any(
-                x in error_str
-                for x in [
-                    "CHAT_ADMIN_REQUIRED",
-                    "phone.CreateGroupCall",
-                    "GROUPCALL_FORBIDDEN",
-                    "GROUPCALL_CREATE_FORBIDDEN",
-                    "VOICE_MESSAGES_FORBIDDEN",
-                ]
-            ):
-
-                await self.stop(
-                    chat_id
-                )
-
-                if message:
-
-                    try:
-
-                        await message.edit_text(
-                            _lang[
-                                "error_vc_disabled"
-                            ]
-                        )
-
-                    except Exception:
-
-                        pass
-
-            elif (
-                "GROUPCALL_INVALID"
-                in error_str
-                or "GROUPCALL"
-                in error_str
-            ):
-
-                await self.stop(
-                    chat_id
-                )
-
-                if message:
-
-                    try:
-
-                        await message.edit_text(
-                            _lang[
-                                "error_no_call"
-                            ]
-                        )
-
-                    except Exception:
-
-                        pass
-
-            else:
-
-                logger.error(
-                    f"RPC error in play_media "
-                    f"for {chat_id}: {e}"
-                )
-
-                await self.stop(
-                    chat_id
-                )
-
-        # ====================================================
-        # NO AUDIO SOURCE
-        # ====================================================
-
-        except exceptions.NoAudioSourceFound:
-
-            if message:
-
-                try:
-
-                    await message.edit_text(
-                        _lang[
-                            "error_no_audio"
-                        ]
-                    )
-
-                except Exception:
-
-                    pass
-
-            await self.play_next(
-                chat_id
-            )
-
-        # ====================================================
-        # CONNECTION ERROR
-        # ====================================================
-
-        except (
-            ConnectionNotFound,
-            TelegramServerError,
-        ):
-
-            await self.stop(
-                chat_id
-            )
-
-            if message:
-
-                try:
-
-                    await message.edit_text(
-                        _lang[
-                            "error_tg_server"
-                        ]
-                    )
-
-                except Exception:
-
-                    pass
-
-        # ====================================================
-        # TIMEOUT
-        # ====================================================
-
-        except TimeoutError as e:
 
             logger.warning(
-                f"⏱️ Timeout joining voice chat "
-                f"{chat_id}: {str(e)}"
+                f"⚠️ Multi-search failed "
+                f"for '{query}': {e}"
             )
 
-            await self.stop(
-                chat_id
-            )
-
-            if message:
-
-                try:
-
-                    await message.edit_text(
-                        "⏱️ <b>Connection timed out!</b>\n\n"
-                        "<blockquote>Failed to join voice chat. "
-                        "Please check your network and try again."
-                        "</blockquote>"
-                    )
-
-                except Exception:
-
-                    pass
-
-            await asyncio.sleep(
-                2
-            )
-
-            await self.play_next(
-                chat_id
-            )
-
-        # ====================================================
-        # UNKNOWN ERROR
-        # ====================================================
-
-        except Exception as e:
-
-            logger.error(
-                f"Unexpected error in play_media "
-                f"for {chat_id}: {e}",
-                exc_info=True,
-            )
-
-            await self.stop(
-                chat_id
-            )
-
-            if message:
-
-                try:
-
-                    await message.edit_text(
-                        f"❌ Playback error: "
-                        f"{str(e)[:100]}"
-                    )
-
-                except Exception:
-
-                    pass
+            return []
 
     # ========================================================
-    # REPLAY
+    # PLAYLIST
     # ========================================================
 
-    async def replay(
+    async def playlist(
         self,
-        chat_id: int,
-    ) -> None:
+        limit: int,
+        user: str,
+        url: str,
+    ) -> list[Track]:
+
+        """Extract tracks from a YouTube playlist."""
 
         try:
 
-            if not await db.get_call(
-                chat_id
-            ):
-
-                return
-
-            message_chat_id = None
-
-            try:
-
-                chat = await app.get_chat(
-                    chat_id
-                )
-
-                if (
-                    chat.type
-                    == enums.ChatType.CHANNEL
-                ):
-
-                    group_id = (
-                        await db.get_group_for_channel(
-                            chat_id
-                        )
-                    )
-
-                    if group_id:
-
-                        message_chat_id = (
-                            group_id
-                        )
-
-            except Exception:
-
-                pass
-
-            # ------------------------------------------------
-            # Get current queue media
-            # ------------------------------------------------
-
-            media = queue.get_current(
-                chat_id
+            plist = await Playlist.get(
+                url
             )
 
-            # ------------------------------------------------
-            # Autoplay fallback
-            # ------------------------------------------------
-
-            if not media:
-
-                media = (
-                    await self._get_autoplay_current(
-                        chat_id
-                    )
-                )
-
-            if not media:
-
-                return
-
-            _lang = await lang.get_lang(
-                chat_id
-            )
-
-            target_chat = (
-                message_chat_id
-                if message_chat_id
-                else chat_id
-            )
-
-            msg = await app.send_message(
-                chat_id=target_chat,
-                text=_lang[
-                    "play_again"
-                ],
-            )
-
-            await self.play_media(
-                chat_id,
-                msg,
-                media,
-                message_chat_id=message_chat_id,
-            )
-
-        except Exception as e:
-
-            logger.error(
-                f"Error in replay for "
-                f"{chat_id}: {e}",
-                exc_info=True,
-            )
-
-    # ========================================================
-    # SEEK
-    # ========================================================
-
-    async def seek_stream(
-        self,
-        chat_id: int,
-        seconds: int,
-    ) -> bool:
-
-        try:
-
-            if not await db.get_call(
-                chat_id
-            ):
-
-                return False
-
-            # ------------------------------------------------
-            # Get current queue media
-            # ------------------------------------------------
-
-            media = queue.get_current(
-                chat_id
-            )
-
-            # ------------------------------------------------
-            # Autoplay fallback
-            # ------------------------------------------------
-
-            if not media:
-
-                media = (
-                    await self._get_autoplay_current(
-                        chat_id
-                    )
-                )
+            tracks = []
 
             if (
-                not media
-                or media.is_live
+                not plist
+                or "videos" not in plist
+                or not plist["videos"]
             ):
 
-                return False
+                return []
 
-            _lang = await lang.get_lang(
-                chat_id
-            )
+            for data in plist[
+                "videos"
+            ][:limit]:
 
-            message_chat_id = None
+                try:
 
-            try:
-
-                chat = await app.get_chat(
-                    chat_id
-                )
-
-                if (
-                    chat.type
-                    == enums.ChatType.CHANNEL
-                ):
-
-                    group_id = (
-                        await db.get_group_for_channel(
-                            chat_id
-                        )
+                    thumbnails = data.get(
+                        "thumbnails",
+                        [],
                     )
 
-                    if group_id:
-
-                        message_chat_id = (
-                            group_id
+                    thumbnail_url = (
+                        thumbnails[-1]
+                        .get(
+                            "url",
+                            "",
                         )
+                        .split("?")[0]
+                        if thumbnails
+                        else ""
+                    )
 
-            except Exception:
+                    link = (
+                        data.get(
+                            "link",
+                            "",
+                        )
+                        .split("&list=")[0]
+                    )
 
-                pass
+                    track = Track(
+                        id=data.get(
+                            "id",
+                            "",
+                        ),
 
-            media.time = seconds
+                        channel_name=data.get(
+                            "channel",
+                            {},
+                        ).get(
+                            "name",
+                            "",
+                        ),
 
-            target_chat = (
-                message_chat_id
-                if message_chat_id
-                else chat_id
-            )
+                        duration=data.get(
+                            "duration",
+                            "0:00",
+                        ),
 
-            # ------------------------------------------------
-            # Get existing message
-            # ------------------------------------------------
+                        duration_sec=utils.to_seconds(
+                            data.get(
+                                "duration",
+                                "0:00",
+                            )
+                        ),
 
-            try:
+                        title=data.get(
+                            "title",
+                            "Unknown",
+                        )[:25],
 
-                msg = await app.get_messages(
-                    target_chat,
-                    media.message_id,
-                )
+                        thumbnail=thumbnail_url,
 
-            except Exception:
+                        url=link,
 
-                msg = None
+                        user=user,
 
-            # ------------------------------------------------
-            # Create seeking message if needed
-            # ------------------------------------------------
+                        view_count="",
+                    )
 
-            if not msg:
+                    tracks.append(
+                        track
+                    )
 
-                msg = await app.send_message(
-                    chat_id=target_chat,
-                    text=_lang[
-                        "seeking"
-                    ],
-                )
+                except Exception:
 
-            await self.play_media(
-                chat_id,
-                msg,
-                media,
-                seek_time=seconds,
-                message_chat_id=message_chat_id,
-            )
+                    continue
 
-            return True
+            return tracks
 
         except Exception as e:
 
-            logger.warning(
-                f"Seek stream failed "
-                f"for {chat_id}: {e}"
+            logger.error(
+                f"Playlist error: {e}"
             )
 
-            return False
+            return []
 
     # ========================================================
-    # PLAY NEXT + AUTOPLAY
+    # DOWNLOAD
     # ========================================================
 
-    async def play_next(
+    async def download(
         self,
-        chat_id: int,
-    ) -> None:
+        video_id: str,
+        is_live: bool = False,
+        video: bool = False,
+    ) -> str | None:
 
-        # ----------------------------------------------------
-        # Create lock
-        # ----------------------------------------------------
+        """
+        Download YouTube media directly
+        using the local downloader.
 
-        if (
-            chat_id
-            not in self._play_next_locks
-        ):
+        Returns:
+            Local filesystem path.
+        """
 
-            self._play_next_locks[
-                chat_id
-            ] = asyncio.Lock()
+        try:
 
-        lock = self._play_next_locks[
-            chat_id
-        ]
-
-        # ----------------------------------------------------
-        # Prevent duplicate execution
-        # ----------------------------------------------------
-
-        if lock.locked():
-
-            logger.debug(
-                f"play_next already running "
-                f"for {chat_id}"
+            youtube_url = (
+                self.base + video_id
             )
 
-            return
+            logger.info(
+                f"🚀 Starting direct "
+                f"YouTube download: {video_id}"
+            )
 
-        async with lock:
+            if video:
 
-            try:
-
-                # =================================================
-                # CHECK ACTIVE CALL
-                # =================================================
-
-                if not await db.get_call(
-                    chat_id
-                ):
-
-                    logger.debug(
-                        f"No active call for {chat_id}"
+                file_path = (
+                    await download_video(
+                        youtube_url
                     )
-
-                    return
-
-                # =================================================
-                # CHANNEL → LINKED GROUP
-                # =================================================
-
-                message_chat_id = None
-
-                try:
-
-                    chat = await app.get_chat(
-                        chat_id
-                    )
-
-                    if (
-                        chat.type
-                        == enums.ChatType.CHANNEL
-                    ):
-
-                        group_id = (
-                            await db.get_group_for_channel(
-                                chat_id
-                            )
-                        )
-
-                        if group_id:
-
-                            message_chat_id = (
-                                group_id
-                            )
-
-                except Exception:
-
-                    pass
-
-                target_chat = (
-                    message_chat_id
-                    if message_chat_id
-                    else chat_id
                 )
 
-                # =================================================
-                # LOOP MODE
-                # =================================================
+            else:
 
-                loop_mode = await db.get_loop(
-                    chat_id
+                file_path = (
+                    await download_audio(
+                        youtube_url
+                    )
                 )
 
-                # =================================================
-                # LOOP CURRENT SONG
-                # =================================================
-
-                if loop_mode == 1:
-
-                    media = queue.get_current(
-                        chat_id
-                    )
-
-                    if not media:
-
-                        media = (
-                            await self._get_autoplay_current(
-                                chat_id
-                            )
-                        )
-
-                    if media:
-
-                        _lang = await lang.get_lang(
-                            chat_id
-                        )
-
-                        try:
-
-                            msg = await app.send_message(
-                                chat_id=target_chat,
-                                text=_lang[
-                                    "play_again"
-                                ],
-                            )
-
-                            await self.play_media(
-                                chat_id,
-                                msg,
-                                media,
-                                message_chat_id=message_chat_id,
-                            )
-
-                        except errors.ChannelPrivate:
-
-                            try:
-
-                                await self.leave_call(
-                                    chat_id
-                                )
-
-                            except Exception:
-
-                                pass
-
-                            await db.rm_chat(
-                                chat_id
-                            )
-
-                        return
-
-                # =================================================
-                # GET NEXT QUEUED SONG
-                # =================================================
-
-                media = queue.get_next(
-                    chat_id
-                )
-
-                # =================================================
-                # LOOP WHOLE QUEUE
-                # =================================================
-
-                if (
-                    not media
-                    and loop_mode == 10
-                ):
-
-                    all_items = queue.get_all(
-                        chat_id
-                    )
-
-                    if all_items:
-
-                        first_track = (
-                            all_items[0]
-                        )
-
-                        _lang = await lang.get_lang(
-                            chat_id
-                        )
-
-                        try:
-
-                            msg = await app.send_message(
-                                chat_id=target_chat,
-                                text="🔁 Looping queue...",
-                            )
-
-                            if not first_track.file_path:
-
-                                is_live = getattr(
-                                    first_track,
-                                    "is_live",
-                                    False,
-                                )
-
-                                first_track.file_path = (
-                                    await yt.download(
-                                        first_track.id,
-                                        is_live=is_live,
-                                        video=getattr(
-                                            first_track,
-                                            "video",
-                                            False,
-                                        ),
-                                    )
-                                )
-
-                            first_track.message_id = (
-                                msg.id
-                            )
-
-                            await self.play_media(
-                                chat_id,
-                                msg,
-                                first_track,
-                                message_chat_id=message_chat_id,
-                            )
-
-                        except errors.ChannelPrivate:
-
-                            await self.leave_call(
-                                chat_id
-                            )
-
-                            await db.rm_chat(
-                                chat_id
-                            )
-
-                    return
-
-                # =================================================
-                # DELETE OLD QUEUE MESSAGE
-                # =================================================
-
-                if media:
-
-                    try:
-
-                        if media.message_id:
-
-                            # Message may belong to the
-                            # target group in channel mode.
-                            delete_chat_id = (
-                                target_chat
-                                if message_chat_id
-                                else chat_id
-                            )
-
-                            await app.delete_messages(
-                                chat_id=delete_chat_id,
-                                message_ids=media.message_id,
-                                revoke=True,
-                            )
-
-                            media.message_id = 0
-
-                    except Exception:
-
-                        pass
-
-                # =================================================
-                # AUTOPLAY
-                # =================================================
-
-                if not media:
-
-                    autoplay_enabled = (
-                        await self._get_autoplay_status(
-                            chat_id
-                        )
-                    )
-
-                    logger.info(
-                        f"🤖 Autoplay check: "
-                        f"chat={chat_id}, "
-                        f"enabled={autoplay_enabled}"
-                    )
-
-                    if autoplay_enabled:
-
-                        try:
-
-                            # -------------------------------------
-                            # GET CURRENT PLAYING TRACK
-                            # -------------------------------------
-
-                            source_media = (
-                                await self._get_autoplay_current(
-                                    chat_id
-                                )
-                            )
-
-                            if not source_media:
-
-                                logger.warning(
-                                    f"🤖 Autoplay source track "
-                                    f"not found for {chat_id}"
-                                )
-
-                            else:
-
-                                search_query = getattr(
-                                    source_media,
-                                    "title",
-                                    "",
-                                ).strip()
-
-                                current_id = getattr(
-                                    source_media,
-                                    "id",
-                                    None,
-                                )
-
-                                logger.info(
-                                    f"🤖 Autoplay source: "
-                                    f"{search_query}"
-                                )
-
-                                # ---------------------------------
-                                # SEARCH
-                                # ---------------------------------
-
-                                if search_query:
-
-                                    logger.info(
-                                        f"🤖 Autoplay searching: "
-                                        f"{search_query}"
-                                    )
-
-                                    # IMPORTANT
-                                    #
-                                    # youtube.py defines:
-                                    #
-                                    # search(
-                                    #     query: str,
-                                    #     m_id: int
-                                    # )
-                                    #
-                                    # and returns:
-                                    #
-                                    # Track | None
-                                    #
-                                    # Therefore DO NOT do:
-                                    #
-                                    # yt.search(
-                                    #     chat_id,
-                                    #     search_query
-                                    # )
-                                    #
-                                    # and DO NOT iterate results.
-                                    #
-                                    # Correct:
-                                    # query first
-                                    # chat_id second.
-
-                                    next_track = (
-                                        await yt.search(
-                                            search_query,
-                                            chat_id,
-                                        )
-                                    )
-
-                                    # ---------------------------------
-                                    # CHECK RESULT
-                                    # ---------------------------------
-
-                                    if next_track:
-
-                                        next_id = getattr(
-                                            next_track,
-                                            "id",
-                                            None,
-                                        )
-
-                                        # --------------------------------
-                                        # Avoid same video
-                                        # --------------------------------
-
-                                        if (
-                                            not next_id
-                                            or next_id
-                                            == current_id
-                                        ):
-
-                                            logger.warning(
-                                                f"🤖 Autoplay search "
-                                                f"returned current/same "
-                                                f"track for {chat_id}"
-                                            )
-
-                                            next_track = None
-
-                                    # ---------------------------------
-                                    # DOWNLOAD
-                                    # ---------------------------------
-
-                                    if next_track:
-
-                                        logger.info(
-                                            f"🤖 Autoplay selected: "
-                                            f"{getattr(next_track, 'title', 'Unknown')}"
-                                        )
-
-                                        is_live = getattr(
-                                            next_track,
-                                            "is_live",
-                                            False,
-                                        )
-
-                                        next_track.file_path = (
-                                            await yt.download(
-                                                next_track.id,
-                                                is_live=is_live,
-                                                video=getattr(
-                                                    next_track,
-                                                    "video",
-                                                    False,
-                                                ),
-                                            )
-                                        )
-
-                                        # --------------------------------
-                                        # DOWNLOAD SUCCESS
-                                        # --------------------------------
-
-                                        if (
-                                            next_track.file_path
-                                        ):
-
-                                            media = (
-                                                next_track
-                                            )
-
-                                            logger.info(
-                                                f"🤖 Autoplay ready: "
-                                                f"{next_track.file_path}"
-                                            )
-
-                                        else:
-
-                                            logger.error(
-                                                f"❌ Autoplay download "
-                                                f"failed for "
-                                                f"{next_track.id}"
-                                            )
-
-                                    else:
-
-                                        logger.warning(
-                                            f"🤖 Autoplay found no "
-                                            f"different track for "
-                                            f"{chat_id}"
-                                        )
-
-                                else:
-
-                                    logger.warning(
-                                        f"🤖 Autoplay source has "
-                                        f"no title for {chat_id}"
-                                    )
-
-                        except Exception as e:
-
-                            logger.error(
-                                f"❌ Autoplay failed for "
-                                f"{chat_id}: {e}",
-                                exc_info=True,
-                            )
-
-                # =================================================
-                # QUEUE EMPTY + AUTOPLAY FAILED/OFF
-                # =================================================
-
-                if not media:
-
-                    if config.AUTO_END:
-
-                        _lang = await lang.get_lang(
-                            chat_id
-                        )
-
-                        try:
-
-                            await app.send_message(
-                                chat_id=target_chat,
-                                text=_lang.get(
-                                    "auto_end",
-                                    "✅ Queue finished. "
-                                    "Stream ended automatically.",
-                                ),
-                            )
-
-                        except Exception:
-
-                            pass
-
-                    return await self.stop(
-                        chat_id
-                    )
-
-                # =================================================
-                # LANGUAGE
-                # =================================================
-
-                _lang = await lang.get_lang(
-                    chat_id
-                )
-
-                msg = None
-
-                # =================================================
-                # DOWNLOAD NEXT TRACK
-                # =================================================
-
-                if not media.file_path:
-
-                    is_live = getattr(
-                        media,
-                        "is_live",
-                        False,
-                    )
-
-                    media.file_path = (
-                        await yt.download(
-                            media.id,
-                            is_live=is_live,
-                            video=getattr(
-                                media,
-                                "video",
-                                False,
-                            ),
-                        )
-                    )
-
-                    if not media.file_path:
-
-                        logger.error(
-                            f"❌ Failed to download "
-                            f"next track {media.id}"
-                        )
-
-                        await self.stop(
-                            chat_id
-                        )
-
-                        return
-
-                # =================================================
-                # SEND PLAY NEXT MESSAGE
-                # =================================================
-
-                try:
-
-                    msg = await app.send_message(
-                        chat_id=target_chat,
-                        text=_lang[
-                            "play_next"
-                        ],
-                    )
-
-                except errors.FloodWait:
-
-                    msg = None
-
-                except errors.ChannelPrivate:
-
-                    try:
-
-                        await self.leave_call(
-                            chat_id
-                        )
-
-                    except Exception:
-
-                        pass
-
-                    await db.rm_chat(
-                        chat_id
-                    )
-
-                    return
-
-                except Exception:
-
-                    msg = None
-
-                # =================================================
-                # MESSAGE ID
-                # =================================================
-
-                media.message_id = (
-                    msg.id
-                    if msg
-                    else 0
-                )
-
-                # =================================================
-                # START PLAYBACK
-                # =================================================
-
-                if msg:
-
-                    await self.play_media(
-                        chat_id,
-                        msg,
-                        media,
-                        message_chat_id=message_chat_id,
-                    )
-
-                else:
-
-                    await self.play_media(
-                        chat_id,
-                        None,
-                        media,
-                        message_chat_id=message_chat_id,
-                    )
-
-                # =================================================
-                # PRELOAD
-                # =================================================
-
-                try:
-
-                    asyncio.create_task(
-                        preload.start_preload(
-                            chat_id,
-                            count=2,
-                        )
-                    )
-
-                except Exception:
-
-                    pass
-
-            # ====================================================
-            # PLAY NEXT ERROR
-            # ====================================================
-
-            except Exception as e:
-
-                logger.error(
-                    f"Error in play_next "
-                    f"for {chat_id}: {e}",
-                    exc_info=True,
-                )
-
-                try:
-
-                    await self.stop(
-                        chat_id
-                    )
-
-                except Exception:
-
-                    pass
-
-    # ========================================================
-    # PING
-    # ========================================================
-
-    async def ping(
-        self,
-    ) -> float:
-
-        pings = [
-            client.ping
-            for client in self.clients
-        ]
-
-        if not pings:
-
-            return 0.0
-
-        return round(
-            sum(pings) / len(pings),
-            2,
-        )
-
-    # ========================================================
-    # PYTGCALLS EVENTS
-    # ========================================================
-
-    async def decorators(
-        self,
-        client: PyTgCalls,
-    ) -> None:
-
-        # ----------------------------------------------------
-        # Register handler only on this client.
-        # boot() calls decorators once per client.
-        # ----------------------------------------------------
-
-        @client.on_update()
-        async def update_handler(
-            _,
-            update: types.Update,
-        ) -> None:
-
-            # =================================================
-            # STREAM ENDED
-            # =================================================
-
-            if isinstance(
-                update,
-                types.StreamEnded,
-            ):
-
-                chat_id = (
-                    update.chat_id
-                )
-
-                current_time = (
-                    asyncio.get_event_loop().time()
-                )
-
-                # ------------------------------------------------
-                # Duplicate event protection
-                # ------------------------------------------------
-
-                if (
-                    chat_id
-                    in self._stream_end_cache
-                ):
-
-                    last_time = (
-                        self._stream_end_cache[
-                            chat_id
-                        ]
-                    )
-
-                    if (
-                        current_time
-                        - last_time
-                        < 2.0
-                    ):
-
-                        logger.debug(
-                            f"⏭️ Duplicate StreamEnded "
-                            f"ignored for {chat_id}"
-                        )
-
-                        return
-
-                self._stream_end_cache[
-                    chat_id
-                ] = current_time
-
-                # ------------------------------------------------
-                # Cleanup old cache entries
-                # ------------------------------------------------
-
-                self._stream_end_cache = {
-                    cid: timestamp
-                    for cid, timestamp
-                    in self._stream_end_cache.items()
-                    if (
-                        current_time
-                        - timestamp
-                        < 5.0
-                    )
-                }
+            if file_path:
 
                 logger.info(
-                    f"🎵 Stream ended: "
-                    f"chat={chat_id}, "
-                    f"type={getattr(update, 'stream_type', 'unknown')}"
+                    f"✅ Download completed: "
+                    f"{file_path}"
                 )
 
-                # ------------------------------------------------
-                # Play next / autoplay
-                # ------------------------------------------------
+                return file_path
 
-                await self.play_next(
-                    chat_id
-                )
-
-            # =================================================
-            # CHAT UPDATE
-            # =================================================
-
-            elif isinstance(
-                update,
-                types.ChatUpdate,
-            ):
-
-                if update.status in [
-                    types.ChatUpdate.Status.KICKED,
-                    types.ChatUpdate.Status.LEFT_GROUP,
-                    types.ChatUpdate.Status.CLOSED_VOICE_CHAT,
-                ]:
-
-                    await self.stop(
-                        update.chat_id
-                    )
-
-    # ========================================================
-    # BOOT
-    # ========================================================
-
-    async def boot(
-        self,
-    ) -> None:
-
-        PyTgCallsSession.notice_displayed = True
-
-        for ub in userbot.clients:
-
-            client = PyTgCalls(
-                ub,
-                cache_duration=100,
+            logger.error(
+                f"❌ Downloader returned "
+                f"no file for: {video_id}"
             )
 
-            await client.start()
+            return None
 
-            self.clients.append(
-                client
+        except Exception as e:
+
+            logger.error(
+                f"❌ YouTube download failed "
+                f"for {video_id}: {e}",
+                exc_info=True,
             )
 
-            await self.decorators(
-                client
-            )
-
-        logger.info(
-            "📞 PyTgCalls client(s) started."
-        )
+            return None
