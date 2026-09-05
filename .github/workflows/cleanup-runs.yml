@@ -8,11 +8,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Delete old workflow runs
+      - name: Delete Completed Runs
         env:
           GH_TOKEN: ${{ secrets.GH_PERSONAL_TOKEN }}
         run: |
-          echo "🔍 Starting cleanup..."
+          echo "🧹 Cleanup started..."
 
           gh api --paginate \
             "/repos/${{ github.repository }}/actions/workflows" \
@@ -22,24 +22,17 @@ jobs:
             gh api --paginate \
               "/repos/${{ github.repository }}/actions/workflows/$workflow_id/runs?per_page=100" \
               --jq '.workflow_runs[]
-                | select(
-                    .status != "in_progress"
-                    and .status != "queued"
-                    and .status != "waiting"
-                    and .status != "requested"
-                    and .status != "pending"
-                  )
-                | [.id, .status, .conclusion] | @tsv' |
-            while IFS=$'\t' read -r run_id status conclusion; do
+                | select(.status == "completed")
+                | .id' |
+            while read run_id; do
 
-              echo "🗑️ Deleting Run #$run_id | Status: $status | Result: $conclusion"
+              echo "🗑️ Deleting completed Run #$run_id..."
 
               if gh api --method DELETE \
-                "/repos/${{ github.repository }}/actions/runs/$run_id" \
-                >/dev/null 2>&1; then
+                "/repos/${{ github.repository }}/actions/runs/$run_id"; then
                 echo "✅ Deleted Run #$run_id"
               else
-                echo "❌ Failed to delete Run #$run_id"
+                echo "❌ Failed Run #$run_id"
               fi
 
             done
