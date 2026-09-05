@@ -28,7 +28,6 @@ from Anysnap.helpers import Media, Track, buttons, thumb
 class PyTgCallsErrorFilter(logging.Filter):
 
     def filter(self, record):
-
         if "UpdateGroupCall" in record.getMessage():
             return False
 
@@ -64,12 +63,12 @@ class TgCall(PyTgCalls):
         # Prevent duplicate StreamEnded events
         self._stream_end_cache = {}
 
-        # ====================================================
+        # ----------------------------------------------------
         # AUTOPLAY CURRENT TRACK
-        # ====================================================
+        # ----------------------------------------------------
         #
         # queue.get_next() can remove the current track.
-        # Therefore autoplay keeps its own reference to the
+        # Therefore we keep a separate reference to the
         # track that is actually playing.
         #
         self._autoplay_current = {}
@@ -320,18 +319,21 @@ class TgCall(PyTgCalls):
                 chat_id
             )
 
-            # Clear autoplay current track
-            self._autoplay_current.pop(
-                chat_id,
-                None,
-            )
-
         except Exception as e:
 
             logger.warning(
                 f"Error clearing queue/call "
                 f"for {chat_id}: {e}"
             )
+
+        # ----------------------------------------------------
+        # CLEAR AUTOPLAY STATE
+        # ----------------------------------------------------
+
+        self._autoplay_current.pop(
+            chat_id,
+            None,
+        )
 
         try:
 
@@ -797,17 +799,19 @@ class TgCall(PyTgCalls):
                 )
 
                 # =================================================
-                # IMPORTANT AUTOPLAY FIX
+                # AUTOPLAY CURRENT TRACK
                 # =================================================
                 #
                 # Save the track that actually started playing.
+                # This is important because queue.get_next()
+                # removes the current queue item.
                 #
                 self._autoplay_current[
                     chat_id
                 ] = media
 
-                logger.debug(
-                    f"🤖 Autoplay current track saved: "
+                logger.info(
+                    f"🤖 Autoplay current track: "
                     f"{getattr(media, 'title', 'Unknown')}"
                 )
 
@@ -1278,11 +1282,13 @@ class TgCall(PyTgCalls):
                 chat_id
             )
 
+            # Fallback for autoplay track
             if not media:
 
-                # Fallback to autoplay current
-                media = self._autoplay_current.get(
-                    chat_id
+                media = (
+                    self._autoplay_current.get(
+                        chat_id
+                    )
                 )
 
             if not media:
@@ -1343,10 +1349,13 @@ class TgCall(PyTgCalls):
                 chat_id
             )
 
+            # Fallback for autoplay track
             if not media:
 
-                media = self._autoplay_current.get(
-                    chat_id
+                media = (
+                    self._autoplay_current.get(
+                        chat_id
+                    )
                 )
 
             if (
@@ -1707,7 +1716,7 @@ class TgCall(PyTgCalls):
                     pass
 
                 # =================================================
-                # 🤖 AUTOPLAY
+                # AUTOPLAY
                 # =================================================
 
                 if not media:
@@ -1729,7 +1738,7 @@ class TgCall(PyTgCalls):
                         try:
 
                             # -------------------------------------
-                            # GET ACTUAL PREVIOUSLY PLAYING TRACK
+                            # GET ACTUAL PLAYING TRACK
                             # -------------------------------------
 
                             source_media = (
@@ -1751,11 +1760,7 @@ class TgCall(PyTgCalls):
                                     source_media,
                                     "title",
                                     "",
-                                )
-
-                                search_query = (
-                                    search_query.strip()
-                                )
+                                ).strip()
 
                                 current_id = getattr(
                                     source_media,
@@ -1769,7 +1774,7 @@ class TgCall(PyTgCalls):
                                 )
 
                                 # ---------------------------------
-                                # SEARCH
+                                # SEARCH YOUTUBE
                                 # ---------------------------------
 
                                 if search_query:
@@ -1787,9 +1792,9 @@ class TgCall(PyTgCalls):
 
                                     next_track = None
 
-                                    # -----------------------------
-                                    # FIND DIFFERENT TRACK
-                                    # -----------------------------
+                                    # ---------------------------------
+                                    # SELECT DIFFERENT RESULT
+                                    # ---------------------------------
 
                                     if results:
 
@@ -1813,9 +1818,9 @@ class TgCall(PyTgCalls):
 
                                                 break
 
-                                    # -----------------------------
+                                    # ---------------------------------
                                     # FOUND
-                                    # -----------------------------
+                                    # ---------------------------------
 
                                     if next_track:
 
@@ -1824,9 +1829,9 @@ class TgCall(PyTgCalls):
                                             f"{getattr(next_track, 'title', 'Unknown')}"
                                         )
 
-                                        # ---------------------------------
+                                        # --------------------------------
                                         # DOWNLOAD AUTOPLAY TRACK
-                                        # ---------------------------------
+                                        # --------------------------------
 
                                         is_live = getattr(
                                             next_track,
@@ -1846,13 +1851,15 @@ class TgCall(PyTgCalls):
                                             )
                                         )
 
-                                        # ---------------------------------
+                                        # --------------------------------
                                         # DOWNLOAD SUCCESS
-                                        # ---------------------------------
+                                        # --------------------------------
 
                                         if next_track.file_path:
 
-                                            media = next_track
+                                            media = (
+                                                next_track
+                                            )
 
                                             logger.info(
                                                 f"🤖 Autoplay ready: "
@@ -2103,7 +2110,6 @@ class TgCall(PyTgCalls):
         client: PyTgCalls,
     ) -> None:
 
-        # IMPORTANT:
         # Register only on the client passed here.
         # boot() already calls this once per client.
 
