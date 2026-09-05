@@ -3,7 +3,6 @@ import logging
 
 from ntgcalls import ConnectionNotFound, TelegramServerError
 from pyrogram import enums, errors
-from pyrogram.errors import MessageIdInvalid
 from pyrogram.types import InputMediaPhoto, Message
 from pytgcalls import PyTgCalls, exceptions, types
 from pytgcalls.pytgcalls_session import PyTgCallsSession
@@ -64,6 +63,16 @@ class TgCall(PyTgCalls):
 
         # Prevent duplicate StreamEnded events
         self._stream_end_cache = {}
+
+        # ====================================================
+        # AUTOPLAY CURRENT TRACK
+        # ====================================================
+        #
+        # queue.get_next() can remove the current track.
+        # Therefore autoplay keeps its own reference to the
+        # track that is actually playing.
+        #
+        self._autoplay_current = {}
 
     # ========================================================
     # EDIT MEDIA WITH RETRY
@@ -309,6 +318,12 @@ class TgCall(PyTgCalls):
 
             await db.remove_call(
                 chat_id
+            )
+
+            # Clear autoplay current track
+            self._autoplay_current.pop(
+                chat_id,
+                None,
             )
 
         except Exception as e:
@@ -781,6 +796,21 @@ class TgCall(PyTgCalls):
                     chat_id
                 )
 
+                # =================================================
+                # IMPORTANT AUTOPLAY FIX
+                # =================================================
+                #
+                # Save the track that actually started playing.
+                #
+                self._autoplay_current[
+                    chat_id
+                ] = media
+
+                logger.debug(
+                    f"🤖 Autoplay current track saved: "
+                    f"{getattr(media, 'title', 'Unknown')}"
+                )
+
                 owner_name = getattr(
                     config,
                     "OWNER_NAME",
@@ -1250,6 +1280,13 @@ class TgCall(PyTgCalls):
 
             if not media:
 
+                # Fallback to autoplay current
+                media = self._autoplay_current.get(
+                    chat_id
+                )
+
+            if not media:
+
                 return
 
             _lang = await lang.get_lang(
@@ -1305,6 +1342,12 @@ class TgCall(PyTgCalls):
             media = queue.get_current(
                 chat_id
             )
+
+            if not media:
+
+                media = self._autoplay_current.get(
+                    chat_id
+                )
 
             if (
                 not media
@@ -1511,6 +1554,14 @@ class TgCall(PyTgCalls):
                         chat_id
                     )
 
+                    if not media:
+
+                        media = (
+                            self._autoplay_current.get(
+                                chat_id
+                            )
+                        )
+
                     if media:
 
                         _lang = await lang.get_lang(
@@ -1550,18 +1601,6 @@ class TgCall(PyTgCalls):
                             )
 
                         return
-
-                # =============================================
-                # IMPORTANT:
-                # SAVE CURRENT BEFORE get_next()
-                #
-                # queue.get_next() removes current.
-                # So current song must be captured first.
-                # =============================================
-
-                current_media = queue.get_current(
-                    chat_id
-                )
 
                 # =============================================
                 # GET NEXT QUEUED SONG
@@ -1679,25 +1718,34 @@ class TgCall(PyTgCalls):
                         )
                     )
 
+                    logger.info(
+                        f"🤖 Autoplay check: "
+                        f"chat={chat_id}, "
+                        f"enabled={autoplay_enabled}"
+                    )
+
                     if autoplay_enabled:
 
                         try:
 
-                            logger.info(
-                                f"🤖 Autoplay triggered "
-                                f"for {chat_id}"
-                            )
-
                             # -------------------------------------
-                            # current_media was saved BEFORE
-                            # queue.get_next()
+                            # GET ACTUAL PREVIOUSLY PLAYING TRACK
                             # -------------------------------------
 
                             source_media = (
-                                current_media
+                                self._autoplay_current.get(
+                                    chat_id
+                                )
                             )
 
-                            if source_media:
+                            if not source_media:
+
+                                logger.warning(
+                                    f"🤖 Autoplay source track "
+                                    f"not found for {chat_id}"
+                                )
+
+                            else:
 
                                 search_query = getattr(
                                     source_media,
@@ -1706,14 +1754,18 @@ class TgCall(PyTgCalls):
                                 )
 
                                 search_query = (
-                                    search_query
-                                    .strip()
+                                    search_query.strip()
                                 )
 
                                 current_id = getattr(
                                     source_media,
                                     "id",
                                     None,
+                                )
+
+                                logger.info(
+                                    f"🤖 Autoplay source: "
+                                    f"{search_query}"
                                 )
 
                                 # ---------------------------------
@@ -1736,7 +1788,7 @@ class TgCall(PyTgCalls):
                                     next_track = None
 
                                     # -----------------------------
-                                    # SELECT DIFFERENT VIDEO
+                                    # FIND DIFFERENT TRACK
                                     # -----------------------------
 
                                     if results:
@@ -1767,55 +1819,74 @@ class TgCall(PyTgCalls):
 
                                     if next_track:
 
-                                        # Put it in queue so queue
-                                        # state remains correct.
-                                        queue.add(
-                                            chat_id,
-                                            next_track,
-                                        )
-
-                                        # IMPORTANT:
-                                        #
-                                        # DO NOT call get_next()
-                                        # here.
-                                        #
-                                        # get_next() would remove
-                                        # the newly added song.
-                                        #
-                                        media = next_track
-
                                         logger.info(
-                                            "🤖 Autoplay selected: "
+                                            f"🤖 Autoplay selected: "
                                             f"{getattr(next_track, 'title', 'Unknown')}"
                                         )
+
+                                        # ---------------------------------
+                                        # DOWNLOAD AUTOPLAY TRACK
+                                        # ---------------------------------
+
+                                        is_live = getattr(
+                                            next_track,
+                                            "is_live",
+                                            False,
+                                        )
+
+                                        next_track.file_path = (
+                                            await yt.download(
+                                                next_track.id,
+                                                is_live=is_live,
+                                                video=getattr(
+                                                    next_track,
+                                                    "video",
+                                                    False,
+                                                ),
+                                            )
+                                        )
+
+                                        # ---------------------------------
+                                        # DOWNLOAD SUCCESS
+                                        # ---------------------------------
+
+                                        if next_track.file_path:
+
+                                            media = next_track
+
+                                            logger.info(
+                                                f"🤖 Autoplay ready: "
+                                                f"{next_track.file_path}"
+                                            )
+
+                                        else:
+
+                                            logger.error(
+                                                f"❌ Autoplay download "
+                                                f"failed for "
+                                                f"{next_track.id}"
+                                            )
 
                                     else:
 
                                         logger.warning(
-                                            f"🤖 Autoplay found "
-                                            f"no different track "
-                                            f"for {chat_id}"
+                                            f"🤖 Autoplay found no "
+                                            f"different track for "
+                                            f"{chat_id}"
                                         )
 
                                 else:
 
                                     logger.warning(
-                                        f"🤖 Current track has "
+                                        f"🤖 Autoplay source has "
                                         f"no title for {chat_id}"
                                     )
-
-                            else:
-
-                                logger.warning(
-                                    f"🤖 Current track unavailable "
-                                    f"for {chat_id}"
-                                )
 
                         except Exception as e:
 
                             logger.error(
-                                f"❌ Autoplay failed "
-                                f"for {chat_id}: {e}",
+                                f"❌ Autoplay failed for "
+                                f"{chat_id}: {e}",
                                 exc_info=True,
                             )
 
@@ -2033,13 +2104,8 @@ class TgCall(PyTgCalls):
     ) -> None:
 
         # IMPORTANT:
-        #
-        # Only register the handler on the client passed
-        # to this function.
-        #
-        # Do NOT loop self.clients here because boot()
-        # already calls decorators() for every client.
-        # Otherwise duplicate handlers can be registered.
+        # Register only on the client passed here.
+        # boot() already calls this once per client.
 
         @client.on_update()
         async def update_handler(
@@ -2059,15 +2125,6 @@ class TgCall(PyTgCalls):
                 chat_id = (
                     update.chat_id
                 )
-
-                # ---------------------------------------------
-                # AUDIO + VIDEO
-                # ---------------------------------------------
-                #
-                # Don't restrict this to AUDIO.
-                # Autoplay should continue regardless of
-                # whether the current stream is audio/video.
-                # ---------------------------------------------
 
                 current_time = (
                     asyncio.get_event_loop().time()
@@ -2114,7 +2171,7 @@ class TgCall(PyTgCalls):
                 )
 
                 # ---------------------------------------------
-                # QUEUE / AUTOPLAY
+                # NEXT SONG / AUTOPLAY
                 # ---------------------------------------------
 
                 await self.play_next(
