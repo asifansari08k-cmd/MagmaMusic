@@ -1,5 +1,8 @@
 import asyncio
 import logging
+import re
+
+from difflib import SequenceMatcher
 
 from ntgcalls import ConnectionNotFound, TelegramServerError
 from pyrogram import enums, errors
@@ -73,14 +76,24 @@ class TgCall(PyTgCalls):
         # AUTOPLAY HISTORY
         # ====================================================
 
-        # chat_id -> list of recently played YouTube IDs
-        #
-        # This prevents autoplay from repeatedly selecting
-        # the same songs.
+        # chat_id -> recently played YouTube IDs
         self._autoplay_history = {}
 
-        # Remember last 10 played IDs per chat.
+        # Remember last 10 played video IDs
         self._autoplay_history_limit = 10
+
+        # ====================================================
+        # AUTOPLAY TITLE HISTORY
+        # ====================================================
+
+        # chat_id -> recently played normalized song titles
+        #
+        # This prevents the same song from repeating through
+        # different YouTube video IDs.
+        self._autoplay_title_history = {}
+
+        # Remember last 10 normalized titles
+        self._autoplay_title_history_limit = 10
 
     # ========================================================
     # AUTOPLAY STATUS
@@ -289,16 +302,13 @@ class TgCall(PyTgCalls):
         return None
 
     # ========================================================
-    # AUTOPLAY HISTORY
+    # AUTOPLAY ID HISTORY
     # ========================================================
 
     def _get_autoplay_history(
         self,
         chat_id: int,
     ) -> set[str]:
-        """
-        Return recently played YouTube video IDs.
-        """
 
         history = self._autoplay_history.get(
             chat_id,
@@ -312,11 +322,6 @@ class TgCall(PyTgCalls):
         chat_id: int,
         video_id: str | None,
     ) -> None:
-        """
-        Remember a played video ID.
-
-        Only the latest N IDs are retained.
-        """
 
         if not video_id:
             return
@@ -348,20 +353,215 @@ class TgCall(PyTgCalls):
             ]
 
         logger.debug(
-            f"🤖 Autoplay history updated: "
+            f"🤖 Autoplay ID history updated: "
             f"chat={chat_id}, "
             f"history={history}"
         )
+
+    # ========================================================
+    # AUTOPLAY TITLE NORMALIZATION
+    # ========================================================
+
+    def _normalize_autoplay_title(
+        self,
+        title: str | None,
+    ) -> str:
+        """
+        Normalize YouTube title for duplicate detection.
+
+        Example:
+
+        Paaro - Official Video
+        Paaro (Official Audio)
+        Paaro Lyrics
+
+        become similar normalized values.
+        """
+
+        if not title:
+            return ""
+
+        title = str(title).lower()
+
+        # Remove common YouTube labels
+        removable = [
+            "official music video",
+            "official video",
+            "official audio",
+            "music video",
+            "lyrics video",
+            "lyric video",
+            "official",
+            "lyrics",
+            "audio",
+            "video",
+            "visualizer",
+            "topic",
+            "hd",
+            "4k",
+            "full song",
+            "full video",
+        ]
+
+        for word in removable:
+
+            title = title.replace(
+                word,
+                " ",
+            )
+
+        # Remove bracketed text
+        title = re.sub(
+            r"\([^)]*\)",
+            " ",
+            title,
+        )
+
+        title = re.sub(
+            r"\[[^\]]*\]",
+            " ",
+            title,
+        )
+
+        # Normalize separators
+        title = re.sub(
+            r"[-_|:/]+",
+            " ",
+            title,
+        )
+
+        # Remove special characters
+        title = re.sub(
+            r"[^a-z0-9\s]",
+            " ",
+            title,
+        )
+
+        # Normalize whitespace
+        title = re.sub(
+            r"\s+",
+            " ",
+            title,
+        ).strip()
+
+        return title
+
+    # ========================================================
+    # AUTOPLAY TITLE HISTORY
+    # ========================================================
+
+    def _get_autoplay_title_history(
+        self,
+        chat_id: int,
+    ) -> set[str]:
+
+        return set(
+            self._autoplay_title_history.get(
+                chat_id,
+                [],
+            )
+        )
+
+    def _remember_autoplay_title(
+        self,
+        chat_id: int,
+        title: str | None,
+    ) -> None:
+
+        normalized = (
+            self._normalize_autoplay_title(
+                title
+            )
+        )
+
+        if not normalized:
+            return
+
+        history = (
+            self._autoplay_title_history.setdefault(
+                chat_id,
+                [],
+            )
+        )
+
+        if normalized in history:
+
+            history.remove(
+                normalized
+            )
+
+        history.append(
+            normalized
+        )
+
+        if (
+            len(history)
+            > self._autoplay_title_history_limit
+        ):
+
+            del history[
+                :-self._autoplay_title_history_limit
+            ]
+
+        logger.debug(
+            f"🤖 Autoplay title history updated: "
+            f"chat={chat_id}, "
+            f"title={normalized}"
+        )
+
+    # ========================================================
+    # SAME SONG DETECTION
+    # ========================================================
+
+    def _is_same_autoplay_song(
+        self,
+        title: str | None,
+        recent_titles: set[str],
+    ) -> bool:
+
+        normalized = (
+            self._normalize_autoplay_title(
+                title
+            )
+        )
+
+        if not normalized:
+            return False
+
+        # Exact normalized title
+        if normalized in recent_titles:
+            return True
+
+        # Similar title detection
+        for old_title in recent_titles:
+
+            ratio = SequenceMatcher(
+                None,
+                normalized,
+                old_title,
+            ).ratio()
+
+            if ratio >= 0.88:
+
+                return True
+
+        return False
+
+    # ========================================================
+    # CLEAR AUTOPLAY HISTORY
+    # ========================================================
 
     def _clear_autoplay_history(
         self,
         chat_id: int,
     ) -> None:
-        """
-        Clear autoplay history.
-        """
 
         self._autoplay_history.pop(
+            chat_id,
+            None,
+        )
+
+        self._autoplay_title_history.pop(
             chat_id,
             None,
         )
@@ -1197,7 +1397,7 @@ class TgCall(PyTgCalls):
                 ] = media
 
                 # ------------------------------------------------
-                # Remember played track
+                # Remember played ID
                 # ------------------------------------------------
 
                 self._remember_autoplay_track(
@@ -1205,6 +1405,19 @@ class TgCall(PyTgCalls):
                     getattr(
                         media,
                         "id",
+                        None,
+                    ),
+                )
+
+                # ------------------------------------------------
+                # Remember played title
+                # ------------------------------------------------
+
+                self._remember_autoplay_title(
+                    chat_id,
+                    getattr(
+                        media,
+                        "title",
                         None,
                     ),
                 )
@@ -1250,6 +1463,15 @@ class TgCall(PyTgCalls):
                                 ),
                             )
 
+                            self._remember_autoplay_title(
+                                group_id,
+                                getattr(
+                                    media,
+                                    "title",
+                                    None,
+                                ),
+                            )
+
                     else:
 
                         channel_id = await db.get_cmode(
@@ -1267,6 +1489,15 @@ class TgCall(PyTgCalls):
                                 getattr(
                                     media,
                                     "id",
+                                    None,
+                                ),
+                            )
+
+                            self._remember_autoplay_title(
+                                channel_id,
+                                getattr(
+                                    media,
+                                    "title",
                                     None,
                                 ),
                             )
@@ -2239,14 +2470,20 @@ class TgCall(PyTgCalls):
                                     None,
                                 )
 
+                                current_title = getattr(
+                                    source_media,
+                                    "title",
+                                    "",
+                                )
+
                                 logger.info(
                                     f"🤖 Autoplay source: "
-                                    f"{search_query} "
+                                    f"{current_title} "
                                     f"[{current_id}]"
                                 )
 
                                 # =================================
-                                # RECENT HISTORY
+                                # RECENT ID HISTORY
                                 # =================================
 
                                 recent_ids = (
@@ -2255,208 +2492,297 @@ class TgCall(PyTgCalls):
                                     )
                                 )
 
-                                # Current song must always
-                                # be excluded.
                                 if current_id:
 
                                     recent_ids.add(
                                         current_id
                                     )
 
+                                # =================================
+                                # RECENT TITLE HISTORY
+                                # =================================
+
+                                recent_titles = (
+                                    self._get_autoplay_title_history(
+                                        chat_id
+                                    )
+                                )
+
+                                current_normalized = (
+                                    self._normalize_autoplay_title(
+                                        current_title
+                                    )
+                                )
+
+                                if current_normalized:
+
+                                    recent_titles.add(
+                                        current_normalized
+                                    )
+
                                 logger.info(
                                     f"🤖 Autoplay excluded "
-                                    f"{len(recent_ids)} "
-                                    f"recent/current IDs"
+                                    f"{len(recent_ids)} IDs "
+                                    f"and "
+                                    f"{len(recent_titles)} titles"
                                 )
 
                                 # =================================
-                                # SEARCH
+                                # SEARCH CANDIDATES
                                 # =================================
+
+                                candidates = []
 
                                 if search_query:
 
+                                    search_queries = [
+                                        search_query,
+                                        f"{search_query} song",
+                                        f"{search_query} music",
+                                    ]
+
+                                    seen_search_ids = set()
+
+                                    for query in search_queries:
+
+                                        try:
+
+                                            logger.info(
+                                                f"🤖 Autoplay searching: "
+                                                f"{query}"
+                                            )
+
+                                            results = (
+                                                await yt.search_all(
+                                                    query,
+                                                    m_id=0,
+                                                    limit=5,
+                                                    exclude_ids=recent_ids,
+                                                )
+                                            )
+
+                                            for track in results:
+
+                                                track_id = getattr(
+                                                    track,
+                                                    "id",
+                                                    None,
+                                                )
+
+                                                if not track_id:
+                                                    continue
+
+                                                if (
+                                                    track_id
+                                                    in seen_search_ids
+                                                ):
+                                                    continue
+
+                                                seen_search_ids.add(
+                                                    track_id
+                                                )
+
+                                                candidates.append(
+                                                    track
+                                                )
+
+                                        except Exception as e:
+
+                                            logger.warning(
+                                                f"🤖 Autoplay search "
+                                                f"failed for "
+                                                f"'{query}': {e}"
+                                            )
+
+                                # =================================
+                                # SELECT DIFFERENT SONG
+                                # =================================
+
+                                next_track = None
+
+                                for index, track in enumerate(
+                                    candidates,
+                                    start=1,
+                                ):
+
+                                    track_id = getattr(
+                                        track,
+                                        "id",
+                                        None,
+                                    )
+
+                                    track_title = getattr(
+                                        track,
+                                        "title",
+                                        "",
+                                    )
+
                                     logger.info(
-                                        f"🤖 Autoplay searching "
-                                        f"5 results: "
-                                        f"{search_query}"
+                                        f"🤖 Candidate {index}: "
+                                        f"{track_title} "
+                                        f"[{track_id}]"
                                     )
 
-                                    results = (
-                                        await yt.search_all(
-                                            search_query,
-                                            m_id=0,
-                                            limit=5,
-                                            exclude_ids=recent_ids,
-                                        )
-                                    )
+                                    # -----------------------------
+                                    # Invalid ID
+                                    # -----------------------------
 
-                                    logger.info(
-                                        f"🤖 Autoplay received "
-                                        f"{len(results)} "
-                                        f"usable results"
-                                    )
+                                    if not track_id:
 
-                                    next_track = None
+                                        continue
 
-                                    # =================================
-                                    # FIND NEW RESULT
-                                    # =================================
+                                    # -----------------------------
+                                    # Same YouTube video
+                                    # -----------------------------
 
-                                    for index, track in enumerate(
-                                        results,
-                                        start=1,
+                                    if (
+                                        track_id
+                                        in recent_ids
                                     ):
 
-                                        track_id = getattr(
-                                            track,
-                                            "id",
-                                            None,
+                                        logger.info(
+                                            f"⏭️ Skip repeated "
+                                            f"video ID: "
+                                            f"{track_id}"
                                         )
 
-                                        track_title = getattr(
-                                            track,
-                                            "title",
-                                            "Unknown",
-                                        )
+                                        continue
+
+                                    # -----------------------------
+                                    # Live stream
+                                    # -----------------------------
+
+                                    if getattr(
+                                        track,
+                                        "is_live",
+                                        False,
+                                    ):
 
                                         logger.info(
-                                            f"🤖 Result {index}: "
-                                            f"{track_title} "
-                                            f"[{track_id}]"
+                                            f"⏭️ Skip live result: "
+                                            f"{track_title}"
                                         )
 
-                                        # -------------------------
-                                        # Invalid
-                                        # -------------------------
+                                        continue
 
-                                        if not track_id:
+                                    # -----------------------------
+                                    # Same / similar song
+                                    # -----------------------------
 
-                                            logger.info(
-                                                "⏭️ Skipping result "
-                                                "without video ID"
-                                            )
-
-                                            continue
-
-                                        # -------------------------
-                                        # Current / history
-                                        # -------------------------
-
-                                        if (
-                                            track_id
-                                            in recent_ids
-                                        ):
-
-                                            logger.info(
-                                                f"⏭️ Skipping recent/"
-                                                f"current video: "
-                                                f"{track_id}"
-                                            )
-
-                                            continue
-
-                                        # -------------------------
-                                        # Live
-                                        # -------------------------
-
-                                        if getattr(
-                                            track,
-                                            "is_live",
-                                            False,
-                                        ):
-
-                                            logger.info(
-                                                f"⏭️ Skipping live "
-                                                f"result: "
-                                                f"{track_title}"
-                                            )
-
-                                            continue
-
-                                        # -------------------------
-                                        # Select
-                                        # -------------------------
-
-                                        next_track = track
-
-                                        break
-
-                                    # =================================
-                                    # DOWNLOAD SELECTED TRACK
-                                    # =================================
-
-                                    if next_track:
+                                    if self._is_same_autoplay_song(
+                                        track_title,
+                                        recent_titles,
+                                    ):
 
                                         logger.info(
-                                            f"🤖 Autoplay selected: "
-                                            f"{getattr(next_track, 'title', 'Unknown')} "
-                                            f"[{getattr(next_track, 'id', None)}]"
+                                            f"⏭️ Skip same/repeated "
+                                            f"song: "
+                                            f"{track_title}"
                                         )
 
-                                        is_live = getattr(
+                                        continue
+
+                                    # -----------------------------
+                                    # SELECT
+                                    # -----------------------------
+
+                                    next_track = track
+
+                                    break
+
+                                # =================================
+                                # DOWNLOAD SELECTED TRACK
+                                # =================================
+
+                                if next_track:
+
+                                    logger.info(
+                                        f"🤖 Autoplay selected: "
+                                        f"{getattr(next_track, 'title', 'Unknown')} "
+                                        f"[{getattr(next_track, 'id', None)}]"
+                                    )
+
+                                    is_live = getattr(
+                                        next_track,
+                                        "is_live",
+                                        False,
+                                    )
+
+                                    next_track.file_path = (
+                                        await yt.download(
+                                            next_track.id,
+                                            is_live=is_live,
+                                            video=getattr(
+                                                next_track,
+                                                "video",
+                                                False,
+                                            ),
+                                        )
+                                    )
+
+                                    # =================================
+                                    # DOWNLOAD SUCCESS
+                                    # =================================
+
+                                    if (
+                                        next_track.file_path
+                                    ):
+
+                                        # IMPORTANT:
+                                        #
+                                        # Autoplay current is always
+                                        # queue[0].
+                                        #
+                                        # This fixes:
+                                        #
+                                        # autoplay current
+                                        # queue = []
+                                        #
+                                        # /play A -> 0
+                                        #
+                                        # Now:
+                                        #
+                                        # queue[0] = autoplay current
+                                        # /play A -> 1
+                                        # /play B -> 2
+                                        # /play C -> 3
+                                        #
+                                        queue.force_add(
+                                            chat_id,
                                             next_track,
-                                            "is_live",
-                                            False,
                                         )
 
-                                        next_track.file_path = (
-                                            await yt.download(
-                                                next_track.id,
-                                                is_live=is_live,
-                                                video=getattr(
-                                                    next_track,
-                                                    "video",
-                                                    False,
-                                                ),
-                                            )
+                                        media = (
+                                            next_track
                                         )
 
-                                        # =================================
-                                        # DOWNLOAD SUCCESS
-                                        # =================================
-
-                                        if (
-                                            next_track.file_path
-                                        ):
-
-                                            media = (
-                                                next_track
-                                            )
-
-                                            logger.info(
-                                                f"🤖 Autoplay ready: "
-                                                f"{next_track.file_path}"
-                                            )
-
-                                        # =================================
-                                        # DOWNLOAD FAILED
-                                        # =================================
-
-                                        else:
-
-                                            logger.error(
-                                                f"❌ Autoplay download "
-                                                f"failed: "
-                                                f"{next_track.id}"
-                                            )
+                                        logger.info(
+                                            f"🤖 Autoplay ready: "
+                                            f"{next_track.file_path}"
+                                        )
 
                                     # =================================
-                                    # NOTHING FOUND
+                                    # DOWNLOAD FAILED
                                     # =================================
 
                                     else:
 
-                                        logger.warning(
-                                            f"🤖 Autoplay found no "
-                                            f"new/different track "
-                                            f"for {chat_id}"
+                                        logger.error(
+                                            f"❌ Autoplay download "
+                                            f"failed: "
+                                            f"{next_track.id}"
                                         )
+
+                                # =================================
+                                # NOTHING FOUND
+                                # =================================
 
                                 else:
 
                                     logger.warning(
-                                        f"🤖 Autoplay source has "
-                                        f"no title for {chat_id}"
+                                        f"🤖 Autoplay found no "
+                                        f"new/different track "
+                                        f"for {chat_id}"
                                     )
 
                         except Exception as e:
