@@ -391,6 +391,12 @@ class MongoDB:
         chat_id: int,
     ) -> int:
 
+        if not userbot.clients:
+
+            raise RuntimeError(
+                "No userbot clients available."
+            )
+
         num = randint(
             1,
             len(userbot.clients),
@@ -420,6 +426,12 @@ class MongoDB:
     ):
 
         from Anysnap import tune
+
+        if not userbot.clients:
+
+            raise RuntimeError(
+                "No userbot clients available."
+            )
 
         if chat_id not in self.assistant:
 
@@ -674,10 +686,16 @@ class MongoDB:
                 chat_id
             )
 
-            await self.chatsdb.insert_one(
+            await self.chatsdb.update_one(
                 {
                     "_id": chat_id
-                }
+                },
+                {
+                    "$set": {
+                        "_id": chat_id
+                    }
+                },
+                upsert=True,
             )
 
     async def rm_chat(
@@ -1005,19 +1023,38 @@ class MongoDB:
         chat_id: int,
     ) -> int | None:
 
-        doc = await self.cache.find_one(
-            {
-                "_id": f"cplay_{chat_id}"
-            }
-        )
+        try:
 
-        return (
-            doc.get(
+            doc = await self.cache.find_one(
+                {
+                    "_id": f"cplay_{chat_id}"
+                }
+            )
+
+            if not doc:
+
+                return None
+
+            channel_id = doc.get(
                 "channel_id"
             )
-            if doc
-            else None
-        )
+
+            if channel_id is None:
+
+                return None
+
+            return int(
+                channel_id
+            )
+
+        except Exception as e:
+
+            logger.error(
+                f"❌ Failed to get channel mode "
+                f"for {chat_id}: {e}"
+            )
+
+            return None
 
     async def set_cmode(
         self,
@@ -1033,61 +1070,182 @@ class MongoDB:
                 }
             )
 
-        else:
+            return
 
-            await self.cache.update_one(
-                {
-                    "_id": f"cplay_{chat_id}"
-                },
-                {
-                    "$set": {
-                        "channel_id": channel_id
-                    }
-                },
-                upsert=True,
-            )
+        await self.cache.update_one(
+            {
+                "_id": f"cplay_{chat_id}"
+            },
+            {
+                "$set": {
+                    "channel_id": int(
+                        channel_id
+                    )
+                }
+            },
+            upsert=True,
+        )
 
     async def get_group_for_channel(
         self,
         channel_id: int,
     ) -> int | None:
 
-        doc = await self.cache.find_one(
-            {
-                "channel_id": channel_id
-            }
-        )
+        try:
 
-        if (
-            doc
-            and str(
-                doc.get(
-                    "_id",
-                    "",
-                )
-            ).startswith(
-                "cplay_"
-            )
-        ):
-
-            group_id_str = str(
-                doc["_id"]
-            ).replace(
-                "cplay_",
-                "",
+            channel_id = int(
+                channel_id
             )
 
-            try:
+            doc = await self.cache.find_one(
+                {
+                    "channel_id": channel_id
+                }
+            )
 
-                return int(
-                    group_id_str
-                )
-
-            except ValueError:
+            if not doc:
 
                 return None
 
-        return None
+            document_id = str(
+                doc.get(
+                    "_id",
+                    ""
+                )
+            )
+
+            if not document_id.startswith(
+                "cplay_"
+            ):
+
+                return None
+
+            group_id_str = (
+                document_id[
+                    len("cplay_"):
+                ]
+            )
+
+            if not group_id_str:
+
+                return None
+
+            return int(
+                group_id_str
+            )
+
+        except (
+            ValueError,
+            TypeError,
+        ):
+
+            return None
+
+        except Exception as e:
+
+            logger.error(
+                f"❌ Failed to find group "
+                f"for channel {channel_id}: {e}"
+            )
+
+            return None
+
+    # ========================================================
+    # AUTOPLAY ID HELPERS
+    # ========================================================
+
+    async def get_autoplay_ids(
+        self,
+        chat_id: int,
+    ) -> set[int]:
+        """
+        Return all IDs that belong to the same
+        playback context.
+
+        Example:
+
+        Group:
+            -100111
+
+        Channel:
+            -100222
+
+        Result:
+
+            {-100111, -100222}
+        """
+
+        ids = {
+            int(chat_id)
+        }
+
+        try:
+
+            chat_id = int(
+                chat_id
+            )
+
+        except (
+            ValueError,
+            TypeError,
+        ):
+
+            return ids
+
+        # ----------------------------------------------------
+        # Current chat is a group
+        # ----------------------------------------------------
+
+        try:
+
+            channel_id = await self.get_cmode(
+                chat_id
+            )
+
+            if channel_id is not None:
+
+                ids.add(
+                    int(channel_id)
+                )
+
+        except Exception:
+
+            pass
+
+        # ----------------------------------------------------
+        # Current chat is a channel
+        # ----------------------------------------------------
+
+        try:
+
+            group_id = (
+                await self.get_group_for_channel(
+                    chat_id
+                )
+            )
+
+            if group_id is not None:
+
+                ids.add(
+                    int(group_id)
+                )
+
+                # Also resolve the group's channel
+                channel_id = await self.get_cmode(
+                    group_id
+                )
+
+                if channel_id is not None:
+
+                    ids.add(
+                        int(channel_id)
+                    )
+
+        except Exception:
+
+            pass
+
+        return ids
 
     # ========================================================
     # AUTO LEAVE
@@ -1144,13 +1302,17 @@ class MongoDB:
         chat_id: int,
     ) -> bool:
         """
-        Return autoplay status for chat.
+        Get autoplay status for one exact chat ID.
 
-        If no setting exists,
-        autoplay is OFF.
+        If no setting exists:
+        autoplay = OFF.
         """
 
         try:
+
+            chat_id = int(
+                chat_id
+            )
 
             doc = await self.cache.find_one(
                 {
@@ -1178,15 +1340,65 @@ class MongoDB:
 
             return False
 
+    async def get_autoplay_for_context(
+        self,
+        chat_id: int,
+    ) -> bool:
+        """
+        Check autoplay for the complete playback context.
+
+        It checks:
+            1. Current chat
+            2. Linked group
+            3. Linked channel
+        """
+
+        try:
+
+            ids = await self.get_autoplay_ids(
+                chat_id
+            )
+
+            for check_id in ids:
+
+                if await self.get_autoplay(
+                    check_id
+                ):
+
+                    logger.info(
+                        f"🤖 Autoplay context enabled: "
+                        f"requested={chat_id}, "
+                        f"matched={check_id}"
+                    )
+
+                    return True
+
+            logger.info(
+                f"🤖 Autoplay context disabled: "
+                f"chat={chat_id}"
+            )
+
+            return False
+
+        except Exception as e:
+
+            logger.error(
+                f"❌ Failed autoplay context "
+                f"check for {chat_id}: {e}",
+                exc_info=True,
+            )
+
+            return False
+
     async def set_autoplay(
         self,
         chat_id: int,
         enabled: bool,
     ) -> None:
         """
-        Enable / disable autoplay.
+        Enable / disable autoplay for one exact ID.
 
-        MongoDB document:
+        Document:
 
         {
             "_id": "autoplay_<chat_id>",
@@ -1194,11 +1406,15 @@ class MongoDB:
         }
         """
 
-        enabled = bool(
-            enabled
-        )
-
         try:
+
+            chat_id = int(
+                chat_id
+            )
+
+            enabled = bool(
+                enabled
+            )
 
             await self.cache.update_one(
                 {
@@ -1227,6 +1443,37 @@ class MongoDB:
             )
 
             raise
+
+    async def set_autoplay_context(
+        self,
+        chat_id: int,
+        enabled: bool,
+    ) -> None:
+        """
+        Enable / disable autoplay for every ID
+        belonging to the same playback context.
+
+        This makes group/channel autoplay settings
+        stay synchronized.
+        """
+
+        ids = await self.get_autoplay_ids(
+            chat_id
+        )
+
+        for target_id in ids:
+
+            await self.set_autoplay(
+                target_id,
+                enabled,
+            )
+
+        logger.info(
+            f"🤖 Autoplay context updated: "
+            f"base={chat_id}, "
+            f"ids={list(ids)}, "
+            f"enabled={bool(enabled)}"
+        )
 
     # ========================================================
     # LOOP
