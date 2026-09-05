@@ -1,0 +1,63 @@
+name: Clean Old VC Music Bot Runs
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Delete old workflow runs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          echo "Finding old workflow runs..."
+
+          gh api --paginate \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/actions/workflows" \
+            --jq '.workflows[] | select(.name == "VC Music Bot Runner") | .id' \
+            > workflow_ids.txt
+
+          > run_ids.txt
+
+          while read workflow_id; do
+            [ -z "$workflow_id" ] && continue
+
+            gh api --paginate \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${{ github.repository }}/actions/workflows/$workflow_id/runs?per_page=100" \
+              --jq '
+                .workflow_runs[]
+                | select(
+                    .status != "in_progress"
+                    and .status != "queued"
+                    and .status != "waiting"
+                    and .status != "requested"
+                    and .status != "pending"
+                  )
+                | .id
+              ' >> run_ids.txt
+          done < workflow_ids.txt
+
+          echo "Runs to delete: $(wc -l < run_ids.txt)"
+
+          while read run_id; do
+            [ -z "$run_id" ] && continue
+
+            echo "Deleting run: $run_id"
+
+            gh api \
+              --method DELETE \
+              -H "Accept: application/vnd.github+json" \
+              "/repos/${{ github.repository }}/actions/runs/$run_id" \
+              || true
+          done < run_ids.txt
+
+          echo "Cleanup complete!"
