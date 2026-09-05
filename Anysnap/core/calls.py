@@ -66,12 +66,221 @@ class TgCall(PyTgCalls):
         # ----------------------------------------------------
         # AUTOPLAY CURRENT TRACK
         # ----------------------------------------------------
-        #
-        # queue.get_next() can remove the current track.
-        # Therefore we keep a separate reference to the
-        # track that is actually playing.
-        #
+
         self._autoplay_current = {}
+
+    # ========================================================
+    # AUTOPLAY STATUS RESOLVER
+    # ========================================================
+
+    async def _get_autoplay_status(
+        self,
+        chat_id: int,
+    ) -> bool:
+
+        # ----------------------------------------------------
+        # 1. Check current playback chat directly
+        # ----------------------------------------------------
+
+        try:
+
+            if await db.get_autoplay(
+                chat_id
+            ):
+
+                logger.info(
+                    f"🤖 Autoplay enabled directly: "
+                    f"chat={chat_id}"
+                )
+
+                return True
+
+        except Exception as e:
+
+            logger.warning(
+                f"Autoplay direct check failed "
+                f"for {chat_id}: {e}"
+            )
+
+        # ----------------------------------------------------
+        # 2. If current chat is a channel,
+        #    check linked group
+        # ----------------------------------------------------
+
+        try:
+
+            chat = await app.get_chat(
+                chat_id
+            )
+
+            if (
+                chat.type
+                == enums.ChatType.CHANNEL
+            ):
+
+                group_id = (
+                    await db.get_group_for_channel(
+                        chat_id
+                    )
+                )
+
+                if group_id:
+
+                    if await db.get_autoplay(
+                        group_id
+                    ):
+
+                        logger.info(
+                            f"🤖 Autoplay enabled "
+                            f"via linked group: "
+                            f"group={group_id}, "
+                            f"channel={chat_id}"
+                        )
+
+                        return True
+
+        except Exception as e:
+
+            logger.debug(
+                f"Channel autoplay mapping "
+                f"failed for {chat_id}: {e}"
+            )
+
+        # ----------------------------------------------------
+        # 3. If current chat is a group,
+        #    check linked channel
+        # ----------------------------------------------------
+
+        try:
+
+            channel_id = await db.get_cmode(
+                chat_id
+            )
+
+            if channel_id:
+
+                if await db.get_autoplay(
+                    channel_id
+                ):
+
+                    logger.info(
+                        f"🤖 Autoplay enabled "
+                        f"via linked channel: "
+                        f"group={chat_id}, "
+                        f"channel={channel_id}"
+                    )
+
+                    return True
+
+        except Exception as e:
+
+            logger.debug(
+                f"Linked channel autoplay "
+                f"check failed for {chat_id}: {e}"
+            )
+
+        # ----------------------------------------------------
+        # 4. Autoplay disabled
+        # ----------------------------------------------------
+
+        logger.info(
+            f"🤖 Autoplay disabled: "
+            f"chat={chat_id}"
+        )
+
+        return False
+
+    # ========================================================
+    # AUTOPLAY CURRENT TRACK RESOLVER
+    # ========================================================
+
+    async def _get_autoplay_current(
+        self,
+        chat_id: int,
+    ):
+
+        # ----------------------------------------------------
+        # 1. Direct
+        # ----------------------------------------------------
+
+        media = self._autoplay_current.get(
+            chat_id
+        )
+
+        if media:
+
+            return media
+
+        # ----------------------------------------------------
+        # 2. Channel → linked group
+        # ----------------------------------------------------
+
+        try:
+
+            chat = await app.get_chat(
+                chat_id
+            )
+
+            if (
+                chat.type
+                == enums.ChatType.CHANNEL
+            ):
+
+                group_id = (
+                    await db.get_group_for_channel(
+                        chat_id
+                    )
+                )
+
+                if group_id:
+
+                    media = (
+                        self._autoplay_current.get(
+                            group_id
+                        )
+                    )
+
+                    if media:
+
+                        return media
+
+        except Exception as e:
+
+            logger.debug(
+                f"Failed channel autoplay "
+                f"track mapping for {chat_id}: {e}"
+            )
+
+        # ----------------------------------------------------
+        # 3. Group → linked channel
+        # ----------------------------------------------------
+
+        try:
+
+            channel_id = await db.get_cmode(
+                chat_id
+            )
+
+            if channel_id:
+
+                media = (
+                    self._autoplay_current.get(
+                        channel_id
+                    )
+                )
+
+                if media:
+
+                    return media
+
+        except Exception as e:
+
+            logger.debug(
+                f"Failed linked channel autoplay "
+                f"track mapping for {chat_id}: {e}"
+            )
+
+        return None
 
     # ========================================================
     # EDIT MEDIA WITH RETRY
@@ -334,6 +543,51 @@ class TgCall(PyTgCalls):
             chat_id,
             None,
         )
+
+        # ----------------------------------------------------
+        # CLEAR MAPPED AUTOPLAY STATE
+        # ----------------------------------------------------
+
+        try:
+
+            chat = await app.get_chat(
+                chat_id
+            )
+
+            if (
+                chat.type
+                == enums.ChatType.CHANNEL
+            ):
+
+                group_id = (
+                    await db.get_group_for_channel(
+                        chat_id
+                    )
+                )
+
+                if group_id:
+
+                    self._autoplay_current.pop(
+                        group_id,
+                        None,
+                    )
+
+            else:
+
+                channel_id = await db.get_cmode(
+                    chat_id
+                )
+
+                if channel_id:
+
+                    self._autoplay_current.pop(
+                        channel_id,
+                        None,
+                    )
+
+        except Exception:
+
+            pass
 
         try:
 
@@ -798,17 +1052,59 @@ class TgCall(PyTgCalls):
                     chat_id
                 )
 
-                # =================================================
-                # AUTOPLAY CURRENT TRACK
-                # =================================================
-                #
-                # Save the track that actually started playing.
-                # This is important because queue.get_next()
-                # removes the current queue item.
-                #
+                # ------------------------------------------------
+                # SAVE CURRENT TRACK FOR AUTOPLAY
+                # ------------------------------------------------
+
                 self._autoplay_current[
                     chat_id
                 ] = media
+
+                # ------------------------------------------------
+                # SAVE UNDER LINKED CHAT ID TOO
+                # ------------------------------------------------
+
+                try:
+
+                    chat_obj = await app.get_chat(
+                        chat_id
+                    )
+
+                    if (
+                        chat_obj.type
+                        == enums.ChatType.CHANNEL
+                    ):
+
+                        group_id = (
+                            await db.get_group_for_channel(
+                                chat_id
+                            )
+                        )
+
+                        if group_id:
+
+                            self._autoplay_current[
+                                group_id
+                            ] = media
+
+                    else:
+
+                        channel_id = await db.get_cmode(
+                            chat_id
+                        )
+
+                        if channel_id:
+
+                            self._autoplay_current[
+                                channel_id
+                            ] = media
+
+                except Exception as e:
+
+                    logger.debug(
+                        f"Could not map autoplay "
+                        f"current track for {chat_id}: {e}"
+                    )
 
                 logger.info(
                     f"🤖 Autoplay current track: "
@@ -1282,11 +1578,11 @@ class TgCall(PyTgCalls):
                 chat_id
             )
 
-            # Fallback for autoplay track
+            # Fallback for autoplay
             if not media:
 
                 media = (
-                    self._autoplay_current.get(
+                    await self._get_autoplay_current(
                         chat_id
                     )
                 )
@@ -1349,11 +1645,11 @@ class TgCall(PyTgCalls):
                 chat_id
             )
 
-            # Fallback for autoplay track
+            # Fallback for autoplay
             if not media:
 
                 media = (
-                    self._autoplay_current.get(
+                    await self._get_autoplay_current(
                         chat_id
                     )
                 )
@@ -1364,10 +1660,6 @@ class TgCall(PyTgCalls):
             ):
 
                 return False
-
-            client = await db.get_assistant(
-                chat_id
-            )
 
             _lang = await lang.get_lang(
                 chat_id
@@ -1566,7 +1858,7 @@ class TgCall(PyTgCalls):
                     if not media:
 
                         media = (
-                            self._autoplay_current.get(
+                            await self._get_autoplay_current(
                                 chat_id
                             )
                         )
@@ -1722,7 +2014,7 @@ class TgCall(PyTgCalls):
                 if not media:
 
                     autoplay_enabled = (
-                        await db.get_autoplay(
+                        await self._get_autoplay_status(
                             chat_id
                         )
                     )
@@ -1742,7 +2034,7 @@ class TgCall(PyTgCalls):
                             # -------------------------------------
 
                             source_media = (
-                                self._autoplay_current.get(
+                                await self._get_autoplay_current(
                                     chat_id
                                 )
                             )
