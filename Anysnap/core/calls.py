@@ -1,8 +1,9 @@
 import asyncio
 import logging
 import re
-
 from difflib import SequenceMatcher
+
+import aiohttp
 
 from ntgcalls import ConnectionNotFound, TelegramServerError
 from pyrogram import enums, errors
@@ -23,10 +24,6 @@ from Anysnap import (
 )
 from Anysnap.helpers import Media, Track, buttons, thumb
 
-
-# ============================================================
-# SUPPRESS HARMLESS PYTGCALLS ERRORS
-# ============================================================
 
 class PyTgCallsErrorFilter(logging.Filter):
 
@@ -53,46 +50,21 @@ logging.getLogger(
 )
 
 
-# ============================================================
-# TG CALL
-# ============================================================
-
 class TgCall(PyTgCalls):
 
     def __init__(self):
 
         self.clients = []
 
-        # Prevent duplicate play_next calls
         self._play_next_locks = {}
-
-        # Prevent duplicate StreamEnded events
         self._stream_end_cache = {}
 
-        # Currently playing track for autoplay
         self._autoplay_current = {}
 
-        # ====================================================
-        # AUTOPLAY HISTORY
-        # ====================================================
-
-        # chat_id -> recently played YouTube IDs
         self._autoplay_history = {}
-
-        # Remember last 10 played video IDs
         self._autoplay_history_limit = 10
 
-        # ====================================================
-        # AUTOPLAY TITLE HISTORY
-        # ====================================================
-
-        # chat_id -> recently played normalized song titles
-        #
-        # This prevents the same song from repeating through
-        # different YouTube video IDs.
         self._autoplay_title_history = {}
-
-        # Remember last 10 normalized titles
         self._autoplay_title_history_limit = 10
 
     # ========================================================
@@ -103,10 +75,6 @@ class TgCall(PyTgCalls):
         self,
         chat_id: int,
     ) -> bool:
-
-        # ----------------------------------------------------
-        # 1. Direct chat
-        # ----------------------------------------------------
 
         try:
 
@@ -126,20 +94,13 @@ class TgCall(PyTgCalls):
                 f"for {chat_id}: {e}"
             )
 
-        # ----------------------------------------------------
-        # 2. Channel → Group
-        # ----------------------------------------------------
-
         try:
 
             chat = await app.get_chat(
                 chat_id
             )
 
-            if (
-                chat.type
-                == enums.ChatType.CHANNEL
-            ):
+            if chat.type == enums.ChatType.CHANNEL:
 
                 group_id = (
                     await db.get_group_for_channel(
@@ -169,10 +130,6 @@ class TgCall(PyTgCalls):
                 f"failed for {chat_id}: {e}"
             )
 
-        # ----------------------------------------------------
-        # 3. Group → Channel
-        # ----------------------------------------------------
-
         try:
 
             channel_id = await db.get_cmode(
@@ -201,10 +158,6 @@ class TgCall(PyTgCalls):
                 f"check failed for {chat_id}: {e}"
             )
 
-        # ----------------------------------------------------
-        # Disabled
-        # ----------------------------------------------------
-
         logger.info(
             f"🤖 Autoplay disabled: "
             f"chat={chat_id}"
@@ -213,17 +166,13 @@ class TgCall(PyTgCalls):
         return False
 
     # ========================================================
-    # AUTOPLAY CURRENT TRACK
+    # AUTOPLAY CURRENT
     # ========================================================
 
     async def _get_autoplay_current(
         self,
         chat_id: int,
     ):
-
-        # ----------------------------------------------------
-        # Direct
-        # ----------------------------------------------------
 
         media = self._autoplay_current.get(
             chat_id
@@ -232,20 +181,13 @@ class TgCall(PyTgCalls):
         if media:
             return media
 
-        # ----------------------------------------------------
-        # Channel → Group
-        # ----------------------------------------------------
-
         try:
 
             chat = await app.get_chat(
                 chat_id
             )
 
-            if (
-                chat.type
-                == enums.ChatType.CHANNEL
-            ):
+            if chat.type == enums.ChatType.CHANNEL:
 
                 group_id = (
                     await db.get_group_for_channel(
@@ -270,10 +212,6 @@ class TgCall(PyTgCalls):
                 f"Failed channel autoplay "
                 f"track mapping for {chat_id}: {e}"
             )
-
-        # ----------------------------------------------------
-        # Group → Channel
-        # ----------------------------------------------------
 
         try:
 
@@ -310,12 +248,12 @@ class TgCall(PyTgCalls):
         chat_id: int,
     ) -> set[str]:
 
-        history = self._autoplay_history.get(
-            chat_id,
-            [],
+        return set(
+            self._autoplay_history.get(
+                chat_id,
+                [],
+            )
         )
-
-        return set(history)
 
     def _remember_autoplay_track(
         self,
@@ -331,7 +269,6 @@ class TgCall(PyTgCalls):
             [],
         )
 
-        # If already present, move to newest position
         if video_id in history:
 
             history.remove(
@@ -342,7 +279,6 @@ class TgCall(PyTgCalls):
             video_id
         )
 
-        # Keep only latest IDs
         if (
             len(history)
             > self._autoplay_history_limit
@@ -352,38 +288,20 @@ class TgCall(PyTgCalls):
                 :-self._autoplay_history_limit
             ]
 
-        logger.debug(
-            f"🤖 Autoplay ID history updated: "
-            f"chat={chat_id}, "
-            f"history={history}"
-        )
-
     # ========================================================
-    # AUTOPLAY TITLE NORMALIZATION
+    # TITLE NORMALIZATION
     # ========================================================
 
     def _normalize_autoplay_title(
         self,
         title: str | None,
     ) -> str:
-        """
-        Normalize YouTube title for duplicate detection.
-
-        Example:
-
-        Paaro - Official Video
-        Paaro (Official Audio)
-        Paaro Lyrics
-
-        become similar normalized values.
-        """
 
         if not title:
             return ""
 
         title = str(title).lower()
 
-        # Remove common YouTube labels
         removable = [
             "official music video",
             "official video",
@@ -410,7 +328,6 @@ class TgCall(PyTgCalls):
                 " ",
             )
 
-        # Remove bracketed text
         title = re.sub(
             r"\([^)]*\)",
             " ",
@@ -423,21 +340,18 @@ class TgCall(PyTgCalls):
             title,
         )
 
-        # Normalize separators
         title = re.sub(
             r"[-_|:/]+",
             " ",
             title,
         )
 
-        # Remove special characters
         title = re.sub(
             r"[^a-z0-9\s]",
             " ",
             title,
         )
 
-        # Normalize whitespace
         title = re.sub(
             r"\s+",
             " ",
@@ -447,7 +361,7 @@ class TgCall(PyTgCalls):
         return title
 
     # ========================================================
-    # AUTOPLAY TITLE HISTORY
+    # TITLE HISTORY
     # ========================================================
 
     def _get_autoplay_title_history(
@@ -503,14 +417,8 @@ class TgCall(PyTgCalls):
                 :-self._autoplay_title_history_limit
             ]
 
-        logger.debug(
-            f"🤖 Autoplay title history updated: "
-            f"chat={chat_id}, "
-            f"title={normalized}"
-        )
-
     # ========================================================
-    # SAME SONG DETECTION
+    # SAME SONG CHECK
     # ========================================================
 
     def _is_same_autoplay_song(
@@ -528,11 +436,9 @@ class TgCall(PyTgCalls):
         if not normalized:
             return False
 
-        # Exact normalized title
         if normalized in recent_titles:
             return True
 
-        # Similar title detection
         for old_title in recent_titles:
 
             ratio = SequenceMatcher(
@@ -542,13 +448,12 @@ class TgCall(PyTgCalls):
             ).ratio()
 
             if ratio >= 0.88:
-
                 return True
 
         return False
 
     # ========================================================
-    # CLEAR AUTOPLAY HISTORY
+    # CLEAR HISTORY
     # ========================================================
 
     def _clear_autoplay_history(
@@ -566,13 +471,383 @@ class TgCall(PyTgCalls):
             None,
         )
 
-        logger.debug(
-            f"🤖 Autoplay history cleared: "
-            f"chat={chat_id}"
-        )
+    # ========================================================
+    # YOUTUBE DURATION
+    # ========================================================
+
+    def _parse_youtube_duration(
+        self,
+        value: str | None,
+    ) -> int:
+
+        if not value:
+            return 0
+
+        value = str(value).strip()
+
+        try:
+
+            parts = [
+                int(x)
+                for x in value.split(":")
+            ]
+
+            if len(parts) == 3:
+
+                return (
+                    parts[0] * 3600
+                    + parts[1] * 60
+                    + parts[2]
+                )
+
+            if len(parts) == 2:
+
+                return (
+                    parts[0] * 60
+                    + parts[1]
+                )
+
+            if len(parts) == 1:
+
+                return parts[0]
+
+        except Exception:
+
+            pass
+
+        return 0
 
     # ========================================================
-    # EDIT MEDIA WITH RETRY
+    # YOUTUBE RELATED / UP NEXT
+    # ========================================================
+
+    async def _get_youtube_related_tracks(
+        self,
+        video_id: str,
+        limit: int = 10,
+    ) -> list[Track]:
+
+        if not video_id:
+            return []
+
+        url = (
+            "https://www.youtube.com/watch?v="
+            + video_id
+        )
+
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 "
+                "(X11; Linux x86_64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/140.0 Safari/537.36"
+            ),
+            "Accept-Language": "en-US,en;q=0.9",
+        }
+
+        timeout = aiohttp.ClientTimeout(
+            total=20
+        )
+
+        try:
+
+            async with aiohttp.ClientSession(
+                headers=headers,
+                timeout=timeout,
+            ) as session:
+
+                async with session.get(
+                    url,
+                    allow_redirects=True,
+                ) as response:
+
+                    if response.status != 200:
+
+                        logger.warning(
+                            f"🤖 YouTube page returned "
+                            f"{response.status}"
+                        )
+
+                        return []
+
+                    webpage = await response.text()
+
+                api_key_match = re.search(
+                    r'"INNERTUBE_API_KEY"\s*:\s*"([^"]+)"',
+                    webpage,
+                )
+
+                client_version_match = re.search(
+                    r'"INNERTUBE_CLIENT_VERSION"\s*:\s*"([^"]+)"',
+                    webpage,
+                )
+
+                if not api_key_match:
+
+                    logger.warning(
+                        "🤖 YouTube Innertube API key "
+                        "not found"
+                    )
+
+                    return []
+
+                api_key = (
+                    api_key_match.group(1)
+                )
+
+                client_version = (
+                    client_version_match.group(1)
+                    if client_version_match
+                    else "2.20260904.01.00"
+                )
+
+                next_url = (
+                    "https://www.youtube.com/"
+                    "youtubei/v1/next?key="
+                    + api_key
+                )
+
+                payload = {
+                    "context": {
+                        "client": {
+                            "hl": "en",
+                            "gl": "US",
+                            "clientName": "WEB",
+                            "clientVersion": client_version,
+                        }
+                    },
+                    "videoId": video_id,
+                }
+
+                async with session.post(
+                    next_url,
+                    json=payload,
+                ) as response:
+
+                    if response.status != 200:
+
+                        logger.warning(
+                            f"🤖 YouTube related request "
+                            f"returned {response.status}"
+                        )
+
+                        return []
+
+                    data = await response.json(
+                        content_type=None
+                    )
+
+        except Exception as e:
+
+            logger.warning(
+                f"🤖 Failed to fetch YouTube "
+                f"related videos: {e}"
+            )
+
+            return []
+
+        results = []
+
+        secondary = (
+            data.get("contents", {})
+            .get("twoColumnWatchNextResults", {})
+            .get("secondaryResults", {})
+            .get("secondaryResults", {})
+            .get("results", [])
+        )
+
+        if not secondary:
+
+            secondary = (
+                data.get("contents", {})
+                .get("twoColumnWatchNextResults", {})
+                .get("secondaryResults", {})
+                .get("results", [])
+            )
+
+        for item in secondary:
+
+            renderer = (
+                item.get(
+                    "compactVideoRenderer"
+                )
+                or item.get(
+                    "videoRenderer"
+                )
+                or item.get(
+                    "compactAutoplayRenderer"
+                )
+            )
+
+            if not renderer:
+                continue
+
+            related_id = renderer.get(
+                "videoId"
+            )
+
+            if not related_id:
+                continue
+
+            title = ""
+
+            title_data = renderer.get(
+                "title",
+                {},
+            )
+
+            if title_data.get(
+                "simpleText"
+            ):
+
+                title = title_data[
+                    "simpleText"
+                ]
+
+            elif title_data.get(
+                "runs"
+            ):
+
+                title = "".join(
+                    run.get("text", "")
+                    for run in title_data[
+                        "runs"
+                    ]
+                )
+
+            if not title:
+                continue
+
+            duration_text = ""
+
+            length_data = renderer.get(
+                "lengthText",
+                {},
+            )
+
+            if length_data.get(
+                "simpleText"
+            ):
+
+                duration_text = (
+                    length_data[
+                        "simpleText"
+                    ]
+                )
+
+            duration_sec = (
+                self._parse_youtube_duration(
+                    duration_text
+                )
+            )
+
+            channel_name = ""
+
+            byline = (
+                renderer.get(
+                    "shortBylineText",
+                    {},
+                )
+                or renderer.get(
+                    "longBylineText",
+                    {},
+                )
+            )
+
+            if byline.get(
+                "runs"
+            ):
+
+                channel_name = (
+                    byline["runs"][0]
+                    .get("text", "")
+                )
+
+            thumbnail = ""
+
+            thumbnails = (
+                renderer.get(
+                    "thumbnail",
+                    {},
+                )
+                .get(
+                    "thumbnails",
+                    [],
+                )
+            )
+
+            if thumbnails:
+
+                thumbnail = (
+                    thumbnails[-1]
+                    .get("url", "")
+                )
+
+            view_count = ""
+
+            view_data = renderer.get(
+                "viewCountText",
+                {},
+            )
+
+            if view_data.get(
+                "simpleText"
+            ):
+
+                view_count = (
+                    view_data[
+                        "simpleText"
+                    ]
+                )
+
+            elif view_data.get(
+                "runs"
+            ):
+
+                view_count = "".join(
+                    run.get("text", "")
+                    for run in view_data[
+                        "runs"
+                    ]
+                )
+
+            track = Track(
+                id=related_id,
+                channel_name=channel_name,
+                duration=duration_text,
+                duration_sec=duration_sec,
+                message_id=0,
+                title=title,
+                thumbnail=thumbnail,
+                url=(
+                    "https://www.youtube.com/watch?v="
+                    + related_id
+                ),
+                view_count=view_count,
+                is_live=False,
+            )
+
+            track.file_path = None
+            track.video = False
+
+            results.append(
+                track
+            )
+
+            if len(results) >= limit:
+                break
+
+        logger.info(
+            f"🤖 YouTube Related returned "
+            f"{len(results)} videos for "
+            f"{video_id}"
+        )
+
+        return results
+
+    # ========================================================
+    # EDIT MEDIA RETRY
     # ========================================================
 
     async def _edit_media_with_retry(
@@ -615,7 +890,7 @@ class TgCall(PyTgCalls):
             return None
 
     # ========================================================
-    # SEND PHOTO WITH RETRY
+    # SEND PHOTO RETRY
     # ========================================================
 
     async def _send_photo_with_retry(
@@ -702,11 +977,6 @@ class TgCall(PyTgCalls):
                 chat_id
             )
 
-            logger.warning(
-                f"Pause requested but assistant "
-                f"not in call for {chat_id}, syncing state"
-            )
-
             return False
 
         except Exception as e:
@@ -766,11 +1036,6 @@ class TgCall(PyTgCalls):
                 chat_id
             )
 
-            logger.warning(
-                f"Resume requested but assistant "
-                f"not in call for {chat_id}, syncing state"
-            )
-
             return False
 
         except Exception as e:
@@ -794,26 +1059,15 @@ class TgCall(PyTgCalls):
             chat_id
         )
 
-        # ----------------------------------------------------
-        # Cancel preload
-        # ----------------------------------------------------
-
         try:
 
             await preload.cancel_preload(
                 chat_id
             )
 
-        except Exception as e:
+        except Exception:
 
-            logger.debug(
-                f"Error cancelling preload "
-                f"for {chat_id}: {e}"
-            )
-
-        # ----------------------------------------------------
-        # Clear queue + call
-        # ----------------------------------------------------
+            pass
 
         try:
 
@@ -832,26 +1086,14 @@ class TgCall(PyTgCalls):
                 f"for {chat_id}: {e}"
             )
 
-        # ----------------------------------------------------
-        # Clear autoplay current
-        # ----------------------------------------------------
-
         self._autoplay_current.pop(
             chat_id,
             None,
         )
 
-        # ----------------------------------------------------
-        # Clear autoplay history
-        # ----------------------------------------------------
-
         self._clear_autoplay_history(
             chat_id
         )
-
-        # ----------------------------------------------------
-        # Clear mapped autoplay current
-        # ----------------------------------------------------
 
         try:
 
@@ -901,10 +1143,6 @@ class TgCall(PyTgCalls):
         except Exception:
 
             pass
-
-        # ----------------------------------------------------
-        # Leave voice chat
-        # ----------------------------------------------------
 
         try:
 
@@ -974,10 +1212,6 @@ class TgCall(PyTgCalls):
             else chat_id
         )
 
-        # ----------------------------------------------------
-        # Thumbnail
-        # ----------------------------------------------------
-
         if (
             config.THUMB_GEN
             and isinstance(media, Track)
@@ -990,10 +1224,6 @@ class TgCall(PyTgCalls):
         else:
 
             _thumb = config.DEFAULT_THUMB
-
-        # ----------------------------------------------------
-        # File check
-        # ----------------------------------------------------
 
         if not media.file_path:
 
@@ -1014,10 +1244,6 @@ class TgCall(PyTgCalls):
 
             return
 
-        # ====================================================
-        # CHAT VALIDATION
-        # ====================================================
-
         try:
 
             chat = await app.get_chat(
@@ -1030,11 +1256,6 @@ class TgCall(PyTgCalls):
                 enums.ChatType.CHANNEL,
             ]:
 
-                logger.error(
-                    f"Invalid chat type for "
-                    f"{chat_id}: {chat.type}"
-                )
-
                 if message:
 
                     await message.edit_text(
@@ -1043,10 +1264,6 @@ class TgCall(PyTgCalls):
 
                 return
 
-            # ------------------------------------------------
-            # CHANNEL SUPPORT
-            # ------------------------------------------------
-
             if chat.type == enums.ChatType.CHANNEL:
 
                 userbot_client = await db.get_client(
@@ -1054,11 +1271,6 @@ class TgCall(PyTgCalls):
                 )
 
                 if not userbot_client:
-
-                    logger.error(
-                        f"No userbot client available "
-                        f"for {chat_id}"
-                    )
 
                     if message:
 
@@ -1081,11 +1293,6 @@ class TgCall(PyTgCalls):
                         assistant_member.status
                         == enums.ChatMemberStatus.BANNED
                     ):
-
-                        logger.error(
-                            f"Assistant banned in "
-                            f"channel {chat_id}"
-                        )
 
                         await db.set_cmode(
                             chat_id,
@@ -1110,11 +1317,6 @@ class TgCall(PyTgCalls):
                         or "USER_NOT_PARTICIPANT"
                         in error_text
                     ):
-
-                        logger.error(
-                            f"Assistant not in channel "
-                            f"{chat_id}: {e}"
-                        )
 
                         if message:
 
@@ -1149,9 +1351,9 @@ class TgCall(PyTgCalls):
 
             if "CHANNEL_INVALID" in str(e):
 
-                logger.error(
-                    f"Invalid channel "
-                    f"{chat_id}: {e}"
+                await db.set_cmode(
+                    chat_id,
+                    None,
                 )
 
                 if message:
@@ -1161,18 +1363,9 @@ class TgCall(PyTgCalls):
                         "Disabling channel play."
                     )
 
-                await db.set_cmode(
-                    chat_id,
-                    None,
-                )
-
                 return
 
             raise
-
-        # ====================================================
-        # FFMPEG PARAMETERS
-        # ====================================================
 
         if seek_time > 1:
 
@@ -1194,10 +1387,6 @@ class TgCall(PyTgCalls):
                 "-sync ext"
             )
 
-        # ====================================================
-        # VIDEO / AUDIO
-        # ====================================================
-
         is_video = getattr(
             media,
             "video",
@@ -1218,10 +1407,6 @@ class TgCall(PyTgCalls):
             ffmpeg_parameters=ffmpeg_params,
         )
 
-        # ====================================================
-        # CHECK EXISTING CALL
-        # ====================================================
-
         try:
 
             call = await client.get_call(
@@ -1229,11 +1414,6 @@ class TgCall(PyTgCalls):
             )
 
             if call:
-
-                logger.debug(
-                    f"Already connected to {chat_id}, "
-                    "leaving before reconnecting..."
-                )
 
                 await client.leave_call(
                     chat_id,
@@ -1253,10 +1433,6 @@ class TgCall(PyTgCalls):
                 f"Error checking connection state "
                 f"for {chat_id}: {e}"
             )
-
-        # ====================================================
-        # PLAY RETRIES
-        # ====================================================
 
         max_retries = 3
         retry_delay = 1
@@ -1302,13 +1478,6 @@ class TgCall(PyTgCalls):
                             < max_retries - 1
                         ):
 
-                            logger.debug(
-                                f"Group call transitioning "
-                                f"for {chat_id}, "
-                                f"retrying in "
-                                f"{retry_delay}s..."
-                            )
-
                             await asyncio.sleep(
                                 retry_delay
                             )
@@ -1335,12 +1504,6 @@ class TgCall(PyTgCalls):
                             < max_retries - 1
                         ):
 
-                            logger.debug(
-                                f"Connection error "
-                                f"for {chat_id}, "
-                                "leaving and retrying..."
-                            )
-
                             try:
 
                                 await client.leave_call(
@@ -1362,10 +1525,6 @@ class TgCall(PyTgCalls):
 
                     raise
 
-            # =================================================
-            # MEDIA TIME
-            # =================================================
-
             if seek_time:
 
                 media.time = seek_time
@@ -1374,31 +1533,15 @@ class TgCall(PyTgCalls):
 
                 media.time = 1
 
-            # =================================================
-            # NORMAL PLAYBACK
-            # =================================================
-
             if not seek_time:
-
-                # ------------------------------------------------
-                # Mark call active
-                # ------------------------------------------------
 
                 await db.add_call(
                     chat_id
                 )
 
-                # ------------------------------------------------
-                # Save current track
-                # ------------------------------------------------
-
                 self._autoplay_current[
                     chat_id
                 ] = media
-
-                # ------------------------------------------------
-                # Remember played ID
-                # ------------------------------------------------
 
                 self._remember_autoplay_track(
                     chat_id,
@@ -1409,10 +1552,6 @@ class TgCall(PyTgCalls):
                     ),
                 )
 
-                # ------------------------------------------------
-                # Remember played title
-                # ------------------------------------------------
-
                 self._remember_autoplay_title(
                     chat_id,
                     getattr(
@@ -1421,15 +1560,6 @@ class TgCall(PyTgCalls):
                         None,
                     ),
                 )
-
-                logger.info(
-                    f"🤖 Autoplay current track: "
-                    f"{getattr(media, 'title', 'Unknown')}"
-                )
-
-                # ------------------------------------------------
-                # Save linked chat mapping
-                # ------------------------------------------------
 
                 try:
 
@@ -1502,16 +1632,9 @@ class TgCall(PyTgCalls):
                                 ),
                             )
 
-                except Exception as e:
+                except Exception:
 
-                    logger.debug(
-                        f"Could not map autoplay "
-                        f"current track for {chat_id}: {e}"
-                    )
-
-                # =================================================
-                # PLAYING MESSAGE
-                # =================================================
+                    pass
 
                 owner_name = getattr(
                     config,
@@ -1536,10 +1659,6 @@ class TgCall(PyTgCalls):
                     owner_link,
                 )
 
-                # =================================================
-                # PROGRESS BAR
-                # =================================================
-
                 if (
                     not media.is_live
                     and media.duration_sec
@@ -1557,7 +1676,7 @@ class TgCall(PyTgCalls):
                             (played / duration) * 100,
                             100,
                         )
-                        if duration != 0
+                        if duration
                         else 0
                     )
 
@@ -1635,10 +1754,6 @@ class TgCall(PyTgCalls):
                         chat_id
                     )
 
-                # =================================================
-                # DELETE REQUEST MESSAGE
-                # =================================================
-
                 if message:
 
                     try:
@@ -1648,10 +1763,6 @@ class TgCall(PyTgCalls):
                     except Exception:
 
                         pass
-
-                # =================================================
-                # SEND PLAYING MESSAGE
-                # =================================================
 
                 sent_photo = (
                     await self._send_photo_with_retry(
@@ -1668,10 +1779,6 @@ class TgCall(PyTgCalls):
                         sent_photo.id
                     )
 
-                # =================================================
-                # PRELOAD
-                # =================================================
-
                 try:
 
                     asyncio.create_task(
@@ -1681,16 +1788,9 @@ class TgCall(PyTgCalls):
                         )
                     )
 
-                except Exception as e:
+                except Exception:
 
-                    logger.debug(
-                        f"Error starting preload "
-                        f"for {chat_id}: {e}"
-                    )
-
-        # ====================================================
-        # FILE NOT FOUND
-        # ====================================================
+                    pass
 
         except FileNotFoundError:
 
@@ -1714,10 +1814,6 @@ class TgCall(PyTgCalls):
                 chat_id
             )
 
-        # ====================================================
-        # NO ACTIVE GROUP CALL
-        # ====================================================
-
         except exceptions.NoActiveGroupCall:
 
             await self.stop(
@@ -1737,10 +1833,6 @@ class TgCall(PyTgCalls):
                 except Exception:
 
                     pass
-
-        # ====================================================
-        # RPC ERROR
-        # ====================================================
 
         except errors.RPCError as e:
 
@@ -1811,10 +1903,6 @@ class TgCall(PyTgCalls):
                     chat_id
                 )
 
-        # ====================================================
-        # NO AUDIO SOURCE
-        # ====================================================
-
         except exceptions.NoAudioSourceFound:
 
             if message:
@@ -1834,10 +1922,6 @@ class TgCall(PyTgCalls):
             await self.play_next(
                 chat_id
             )
-
-        # ====================================================
-        # CONNECTION ERROR
-        # ====================================================
 
         except (
             ConnectionNotFound,
@@ -1862,16 +1946,7 @@ class TgCall(PyTgCalls):
 
                     pass
 
-        # ====================================================
-        # TIMEOUT
-        # ====================================================
-
-        except TimeoutError as e:
-
-            logger.warning(
-                f"⏱️ Timeout joining voice chat "
-                f"{chat_id}: {str(e)}"
-            )
+        except TimeoutError:
 
             await self.stop(
                 chat_id
@@ -1899,10 +1974,6 @@ class TgCall(PyTgCalls):
             await self.play_next(
                 chat_id
             )
-
-        # ====================================================
-        # UNKNOWN ERROR
-        # ====================================================
 
         except Exception as e:
 
@@ -1988,7 +2059,6 @@ class TgCall(PyTgCalls):
                 )
 
             if not media:
-
                 return
 
             _lang = await lang.get_lang(
@@ -2141,17 +2211,13 @@ class TgCall(PyTgCalls):
             return False
 
     # ========================================================
-    # PLAY NEXT + AUTOPLAY
+    # PLAY NEXT
     # ========================================================
 
     async def play_next(
         self,
         chat_id: int,
     ) -> None:
-
-        # ----------------------------------------------------
-        # Lock
-        # ----------------------------------------------------
 
         if (
             chat_id
@@ -2166,10 +2232,6 @@ class TgCall(PyTgCalls):
             chat_id
         ]
 
-        # ----------------------------------------------------
-        # Duplicate protection
-        # ----------------------------------------------------
-
         if lock.locked():
 
             logger.debug(
@@ -2183,23 +2245,11 @@ class TgCall(PyTgCalls):
 
             try:
 
-                # =================================================
-                # ACTIVE CALL
-                # =================================================
-
                 if not await db.get_call(
                     chat_id
                 ):
 
-                    logger.debug(
-                        f"No active call for {chat_id}"
-                    )
-
                     return
-
-                # =================================================
-                # CHANNEL → GROUP
-                # =================================================
 
                 message_chat_id = None
 
@@ -2235,10 +2285,6 @@ class TgCall(PyTgCalls):
                     if message_chat_id
                     else chat_id
                 )
-
-                # =================================================
-                # LOOP MODE
-                # =================================================
 
                 loop_mode = await db.get_loop(
                     chat_id
@@ -2303,7 +2349,7 @@ class TgCall(PyTgCalls):
                         return
 
                 # =================================================
-                # GET NEXT QUEUED SONG
+                # GET NEXT QUEUE ITEM
                 # =================================================
 
                 media = queue.get_next(
@@ -2439,30 +2485,13 @@ class TgCall(PyTgCalls):
 
                         try:
 
-                            # =====================================
-                            # CURRENT TRACK
-                            # =====================================
-
                             source_media = (
                                 await self._get_autoplay_current(
                                     chat_id
                                 )
                             )
 
-                            if not source_media:
-
-                                logger.warning(
-                                    f"🤖 Autoplay source track "
-                                    f"not found for {chat_id}"
-                                )
-
-                            else:
-
-                                search_query = getattr(
-                                    source_media,
-                                    "title",
-                                    "",
-                                ).strip()
+                            if source_media:
 
                                 current_id = getattr(
                                     source_media,
@@ -2476,16 +2505,6 @@ class TgCall(PyTgCalls):
                                     "",
                                 )
 
-                                logger.info(
-                                    f"🤖 Autoplay source: "
-                                    f"{current_title} "
-                                    f"[{current_id}]"
-                                )
-
-                                # =================================
-                                # RECENT ID HISTORY
-                                # =================================
-
                                 recent_ids = (
                                     self._get_autoplay_history(
                                         chat_id
@@ -2497,10 +2516,6 @@ class TgCall(PyTgCalls):
                                     recent_ids.add(
                                         current_id
                                     )
-
-                                # =================================
-                                # RECENT TITLE HISTORY
-                                # =================================
 
                                 recent_titles = (
                                     self._get_autoplay_title_history(
@@ -2521,78 +2536,99 @@ class TgCall(PyTgCalls):
                                     )
 
                                 logger.info(
-                                    f"🤖 Autoplay excluded "
-                                    f"{len(recent_ids)} IDs "
-                                    f"and "
-                                    f"{len(recent_titles)} titles"
+                                    f"🤖 Autoplay source: "
+                                    f"{current_title} "
+                                    f"[{current_id}]"
                                 )
 
                                 # =================================
-                                # SEARCH CANDIDATES
+                                # FIRST: YOUTUBE RELATED / UP NEXT
                                 # =================================
 
                                 candidates = []
 
-                                if search_query:
+                                if current_id:
 
-                                    search_queries = [
-                                        search_query,
-                                        f"{search_query} song",
-                                        f"{search_query} music",
-                                    ]
+                                    try:
 
-                                    seen_search_ids = set()
-
-                                    for query in search_queries:
-
-                                        try:
-
-                                            logger.info(
-                                                f"🤖 Autoplay searching: "
-                                                f"{query}"
+                                        candidates = (
+                                            await self._get_youtube_related_tracks(
+                                                current_id,
+                                                limit=10,
                                             )
+                                        )
 
-                                            results = (
-                                                await yt.search_all(
-                                                    query,
-                                                    m_id=0,
-                                                    limit=5,
-                                                    exclude_ids=recent_ids,
+                                    except Exception as e:
+
+                                        logger.warning(
+                                            f"🤖 Related video "
+                                            f"fetch failed: {e}"
+                                        )
+
+                                # =================================
+                                # FALLBACK SEARCH
+                                # =================================
+
+                                if not candidates:
+
+                                    search_query = (
+                                        current_title.strip()
+                                    )
+
+                                    if search_query:
+
+                                        search_queries = [
+                                            search_query,
+                                            f"{search_query} song",
+                                            f"{search_query} music",
+                                        ]
+
+                                        seen_search_ids = set()
+
+                                        for query in search_queries:
+
+                                            try:
+
+                                                results = (
+                                                    await yt.search_all(
+                                                        query,
+                                                        m_id=0,
+                                                        limit=5,
+                                                        exclude_ids=recent_ids,
+                                                    )
                                                 )
-                                            )
 
-                                            for track in results:
+                                                for track in results:
 
-                                                track_id = getattr(
-                                                    track,
-                                                    "id",
-                                                    None,
+                                                    track_id = getattr(
+                                                        track,
+                                                        "id",
+                                                        None,
+                                                    )
+
+                                                    if not track_id:
+                                                        continue
+
+                                                    if (
+                                                        track_id
+                                                        in seen_search_ids
+                                                    ):
+                                                        continue
+
+                                                    seen_search_ids.add(
+                                                        track_id
+                                                    )
+
+                                                    candidates.append(
+                                                        track
+                                                    )
+
+                                            except Exception as e:
+
+                                                logger.warning(
+                                                    f"🤖 Autoplay fallback "
+                                                    f"search failed: {e}"
                                                 )
-
-                                                if not track_id:
-                                                    continue
-
-                                                if (
-                                                    track_id
-                                                    in seen_search_ids
-                                                ):
-                                                    continue
-
-                                                seen_search_ids.add(
-                                                    track_id
-                                                )
-
-                                                candidates.append(
-                                                    track
-                                                )
-
-                                        except Exception as e:
-
-                                            logger.warning(
-                                                f"🤖 Autoplay search "
-                                                f"failed for "
-                                                f"'{query}': {e}"
-                                            )
 
                                 # =================================
                                 # SELECT DIFFERENT SONG
@@ -2623,17 +2659,8 @@ class TgCall(PyTgCalls):
                                         f"[{track_id}]"
                                     )
 
-                                    # -----------------------------
-                                    # Invalid ID
-                                    # -----------------------------
-
                                     if not track_id:
-
                                         continue
-
-                                    # -----------------------------
-                                    # Same YouTube video
-                                    # -----------------------------
 
                                     if (
                                         track_id
@@ -2648,10 +2675,6 @@ class TgCall(PyTgCalls):
 
                                         continue
 
-                                    # -----------------------------
-                                    # Live stream
-                                    # -----------------------------
-
                                     if getattr(
                                         track,
                                         "is_live",
@@ -2664,10 +2687,6 @@ class TgCall(PyTgCalls):
                                         )
 
                                         continue
-
-                                    # -----------------------------
-                                    # Same / similar song
-                                    # -----------------------------
 
                                     if self._is_same_autoplay_song(
                                         track_title,
@@ -2682,16 +2701,11 @@ class TgCall(PyTgCalls):
 
                                         continue
 
-                                    # -----------------------------
-                                    # SELECT
-                                    # -----------------------------
-
                                     next_track = track
-
                                     break
 
                                 # =================================
-                                # DOWNLOAD SELECTED TRACK
+                                # DOWNLOAD
                                 # =================================
 
                                 if next_track:
@@ -2720,33 +2734,18 @@ class TgCall(PyTgCalls):
                                         )
                                     )
 
-                                    # =================================
-                                    # DOWNLOAD SUCCESS
-                                    # =================================
+                                    if next_track.file_path:
 
-                                    if (
-                                        next_track.file_path
-                                    ):
+                                        # =================================
+                                        # IMPORTANT QUEUE FIX
+                                        #
+                                        # Autoplay current = queue[0]
+                                        #
+                                        # First manual song = 1
+                                        # Second manual song = 2
+                                        # Third manual song = 3
+                                        # =================================
 
-                                        # IMPORTANT:
-                                        #
-                                        # Autoplay current is always
-                                        # queue[0].
-                                        #
-                                        # This fixes:
-                                        #
-                                        # autoplay current
-                                        # queue = []
-                                        #
-                                        # /play A -> 0
-                                        #
-                                        # Now:
-                                        #
-                                        # queue[0] = autoplay current
-                                        # /play A -> 1
-                                        # /play B -> 2
-                                        # /play C -> 3
-                                        #
                                         queue.force_add(
                                             chat_id,
                                             next_track,
@@ -2761,10 +2760,6 @@ class TgCall(PyTgCalls):
                                             f"{next_track.file_path}"
                                         )
 
-                                    # =================================
-                                    # DOWNLOAD FAILED
-                                    # =================================
-
                                     else:
 
                                         logger.error(
@@ -2773,16 +2768,12 @@ class TgCall(PyTgCalls):
                                             f"{next_track.id}"
                                         )
 
-                                # =================================
-                                # NOTHING FOUND
-                                # =================================
-
                                 else:
 
                                     logger.warning(
-                                        f"🤖 Autoplay found no "
-                                        f"new/different track "
-                                        f"for {chat_id}"
+                                        f"🤖 No valid new "
+                                        f"autoplay track for "
+                                        f"{chat_id}"
                                     )
 
                         except Exception as e:
@@ -2835,7 +2826,7 @@ class TgCall(PyTgCalls):
                 msg = None
 
                 # =================================================
-                # DOWNLOAD NEXT TRACK
+                # DOWNLOAD NORMAL QUEUE ITEM
                 # =================================================
 
                 if not media.file_path:
@@ -2910,10 +2901,6 @@ class TgCall(PyTgCalls):
 
                     msg = None
 
-                # =================================================
-                # MESSAGE ID
-                # =================================================
-
                 media.message_id = (
                     msg.id
                     if msg
@@ -2924,27 +2911,12 @@ class TgCall(PyTgCalls):
                 # START PLAYBACK
                 # =================================================
 
-                if msg:
-
-                    await self.play_media(
-                        chat_id,
-                        msg,
-                        media,
-                        message_chat_id=message_chat_id,
-                    )
-
-                else:
-
-                    await self.play_media(
-                        chat_id,
-                        None,
-                        media,
-                        message_chat_id=message_chat_id,
-                    )
-
-                # =================================================
-                # PRELOAD
-                # =================================================
+                await self.play_media(
+                    chat_id,
+                    msg,
+                    media,
+                    message_chat_id=message_chat_id,
+                )
 
                 try:
 
@@ -2958,10 +2930,6 @@ class TgCall(PyTgCalls):
                 except Exception:
 
                     pass
-
-            # ====================================================
-            # PLAY NEXT ERROR
-            # ====================================================
 
             except Exception as e:
 
@@ -2995,7 +2963,6 @@ class TgCall(PyTgCalls):
         ]
 
         if not pings:
-
             return 0.0
 
         return round(
@@ -3004,7 +2971,7 @@ class TgCall(PyTgCalls):
         )
 
     # ========================================================
-    # PYTGCALLS EVENTS
+    # EVENTS
     # ========================================================
 
     async def decorators(
@@ -3018,10 +2985,6 @@ class TgCall(PyTgCalls):
             update: types.Update,
         ) -> None:
 
-            # =================================================
-            # STREAM ENDED
-            # =================================================
-
             if isinstance(
                 update,
                 types.StreamEnded,
@@ -3034,10 +2997,6 @@ class TgCall(PyTgCalls):
                 current_time = (
                     asyncio.get_event_loop().time()
                 )
-
-                # ------------------------------------------------
-                # Duplicate protection
-                # ------------------------------------------------
 
                 if (
                     chat_id
@@ -3067,10 +3026,6 @@ class TgCall(PyTgCalls):
                     chat_id
                 ] = current_time
 
-                # ------------------------------------------------
-                # Cleanup cache
-                # ------------------------------------------------
-
                 self._stream_end_cache = {
                     cid: timestamp
                     for cid, timestamp
@@ -3088,17 +3043,9 @@ class TgCall(PyTgCalls):
                     f"type={getattr(update, 'stream_type', 'unknown')}"
                 )
 
-                # ------------------------------------------------
-                # Next / Autoplay
-                # ------------------------------------------------
-
                 await self.play_next(
                     chat_id
                 )
-
-            # =================================================
-            # CHAT UPDATE
-            # =================================================
 
             elif isinstance(
                 update,
