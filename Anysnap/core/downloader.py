@@ -3,6 +3,7 @@ import re
 import time
 import asyncio
 import sqlite3
+import threading
 from typing import Any, Dict, Optional
 
 import yt_dlp
@@ -21,7 +22,67 @@ MAX_VIDEO_QUALITY = os.getenv("MAX_VIDEO_QUALITY", "720")
 COOKIES_FILE = os.getenv("COOKIES_FILE", "cookies.txt")
 DB_FILE = os.getenv("DB_FILE", "cache.db")
 
+# Extreme but practical settings.
+CONCURRENT_FRAGMENTS = int(
+    os.getenv("CONCURRENT_FRAGMENTS", "64")
+)
+
+HTTP_CHUNK_SIZE = int(
+    os.getenv("HTTP_CHUNK_SIZE", str(100 * 1024 * 1024))
+)
+
+SOCKET_TIMEOUT = int(
+    os.getenv("SOCKET_TIMEOUT", "20")
+)
+
+NO_PROGRESS_TIMEOUT = int(
+    os.getenv("NO_PROGRESS_TIMEOUT", "120")
+)
+
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+
+# =========================================================
+# PROGRESS WATCH
+# =========================================================
+
+class ProgressTracker:
+    """
+    Tracks real download progress.
+
+    This is NOT a total download timeout.
+    A large file can take as long as necessary.
+
+    Timeout happens only when absolutely no progress
+    has been seen for NO_PROGRESS_TIMEOUT seconds.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.last_progress = time.monotonic()
+        self.downloaded = 0
+
+    def hook(self, data: Dict[str, Any]):
+        status = data.get("status")
+
+        if status == "downloading":
+            with self.lock:
+                self.last_progress = time.monotonic()
+
+                downloaded = data.get("downloaded_bytes")
+                if downloaded is not None:
+                    self.downloaded = downloaded
+
+        elif status == "finished":
+            with self.lock:
+                self.last_progress = time.monotonic()
+
+    def stalled(self) -> bool:
+        with self.lock:
+            return (
+                time.monotonic() - self.last_progress
+                > NO_PROGRESS_TIMEOUT
+            )
 
 
 # =========================================================
@@ -64,7 +125,6 @@ def get_cached_metadata(
     video_id: str,
     file_type: str,
 ) -> Optional[Dict[str, Any]]:
-    """Return valid cached metadata."""
 
     try:
         with sqlite3.connect(DB_FILE, timeout=15.0) as conn:
@@ -112,11 +172,9 @@ def get_cached_metadata(
                 if file_path and os.path.isfile(file_path):
                     try:
                         os.remove(file_path)
-
                         logger.info(
                             f"🗑️ Removed expired file: {file_path}"
                         )
-
                     except OSError as e:
                         logger.warning(
                             f"⚠️ Could not remove expired file: {e}"
@@ -206,7 +264,6 @@ def find_legacy_cached_file(
     video_id: str,
     ext: str,
 ) -> Optional[str]:
-    """Find older downloaded files not present in SQLite."""
 
     if not video_id:
         return None
@@ -240,7 +297,6 @@ init_db()
 # =========================================================
 
 def extract_video_id(url: str) -> Optional[str]:
-    """Extract the 11-character YouTube video ID."""
 
     if not url:
         return None
@@ -272,7 +328,7 @@ def extract_video_id(url: str) -> Optional[str]:
 # =========================================================
 
 def get_base_ydl_opts() -> Dict[str, Any]:
-    """Create common yt-dlp configuration."""
+    """Common high-speed yt-dlp configuration."""
 
     opts = {
         "outtmpl": os.path.join(
@@ -283,21 +339,33 @@ def get_base_ydl_opts() -> Dict[str, Any]:
         "restrictfilenames": True,
         "noplaylist": True,
 
-        "quiet": False,
-        "no_warnings": False,
+        # -------------------------------------------------
+        # RETRIES / NETWORK
+        # -------------------------------------------------
 
         "retries": 10,
         "fragment_retries": 10,
+        "file_access_retries": 5,
 
-        "socket_timeout": 30,
+        "socket_timeout": SOCKET_TIMEOUT,
 
         "continuedl": True,
+        "nopart": False,
 
-        # Speed optimization
-        "concurrent_fragment_downloads": 32,
-        "http_chunk_size": 52428800,
+        # -------------------------------------------------
+        # EXTREME DOWNLOAD SPEED
+        # -------------------------------------------------
 
-        # YouTube JS challenge support
+        "concurrent_fragment_downloads":
+            CONCURRENT_FRAGMENTS,
+
+        "http_chunk_size":
+            HTTP_CHUNK_SIZE,
+
+        # -------------------------------------------------
+        # YOUTUBE JS CHALLENGE
+        # -------------------------------------------------
+
         "js_runtimes": {
             "node": {},
         },
@@ -305,6 +373,22 @@ def get_base_ydl_opts() -> Dict[str, Any]:
         "remote_components": [
             "ejs:github",
         ],
+
+        # -------------------------------------------------
+        # REDUCE LOGGING OVERHEAD
+        # -------------------------------------------------
+
+        "quiet": True,
+        "no_warnings": True,
+
+        # -------------------------------------------------
+        # CONNECTION
+        # -------------------------------------------------
+
+        "nocheckcertificate": True,
+
+        "updatetime": False,
+        "clean_infojson": False,
     }
 
     # -----------------------------------------------------
@@ -335,7 +419,6 @@ def extract_youtube_with_fallback(
     opts: Dict[str, Any],
     download: bool = True,
 ) -> Dict[str, Any]:
-    """Try normal extraction, then web_embedded fallback."""
 
     strategies = [
         (
@@ -398,7 +481,6 @@ def extract_youtube_with_fallback(
 # =========================================================
 
 def download_audio_sync(url: str) -> str:
-    """Download YouTube audio and return local file path."""
 
     video_id = extract_video_id(url)
 
@@ -407,6 +489,7 @@ def download_audio_sync(url: str) -> str:
     # -----------------------------------------------------
 
     if video_id:
+
         cached_data = get_cached_metadata(
             video_id,
             "mp3",
@@ -469,14 +552,19 @@ def download_audio_sync(url: str) -> str:
     # -----------------------------------------------------
 
     logger.info(
-        f"🎵 Starting audio download: {url}"
+        f"🎵 Starting EXTREME audio download: {url}"
     )
 
     opts = get_base_ydl_opts()
 
+    tracker = ProgressTracker()
+
     opts.update(
         {
-            # Quality unchanged
+            # -------------------------------------------------
+            # 192 KBPS AUDIO — UNCHANGED
+            # -------------------------------------------------
+
             "format": (
                 "140/"
                 "ba[ext=m4a]/"
@@ -493,22 +581,37 @@ def download_audio_sync(url: str) -> str:
                 },
             ],
 
-            # Speed
-            "concurrent_fragment_downloads": 32,
-            "http_chunk_size": 52428800,
+            # -------------------------------------------------
+            # EXTREME SPEED
+            # -------------------------------------------------
 
-            "nocheckcertificate": True,
+            "concurrent_fragment_downloads":
+                CONCURRENT_FRAGMENTS,
+
+            "http_chunk_size":
+                HTTP_CHUNK_SIZE,
+
+            # -------------------------------------------------
+            # RETRIES
+            # -------------------------------------------------
+
+            "retries": 10,
+            "fragment_retries": 10,
+            "socket_timeout": SOCKET_TIMEOUT,
+
+            # -------------------------------------------------
+            # PROGRESS
+            # -------------------------------------------------
+
+            "progress_hooks": [
+                tracker.hook,
+            ],
 
             "noprogress": True,
-            "quiet": True,
-            "no_warnings": True,
 
-            "updatetime": False,
-            "clean_infojson": False,
-
-            "retries": 5,
-            "fragment_retries": 5,
-            "socket_timeout": 15,
+            # -------------------------------------------------
+            # FFMPEG
+            # -------------------------------------------------
 
             "postprocessor_args": [
                 "-threads",
@@ -520,11 +623,16 @@ def download_audio_sync(url: str) -> str:
     )
 
     try:
+
         info = extract_youtube_with_fallback(
             url,
             opts,
             download=True,
         )
+
+        # -------------------------------------------------
+        # PREPARE OUTPUT
+        # -------------------------------------------------
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             filename = ydl.prepare_filename(info)
@@ -563,6 +671,7 @@ def download_audio_sync(url: str) -> str:
         return final_path
 
     except yt_dlp.utils.DownloadError as e:
+
         logger.error(
             f"❌ yt-dlp audio error: {e}"
         )
@@ -572,6 +681,7 @@ def download_audio_sync(url: str) -> str:
         )
 
     except Exception as e:
+
         logger.error(
             f"❌ Audio download error: {e}",
             exc_info=True,
@@ -587,7 +697,6 @@ def download_audio_sync(url: str) -> str:
 # =========================================================
 
 def download_video_sync(url: str) -> str:
-    """Download YouTube video and return local file path."""
 
     video_id = extract_video_id(url)
 
@@ -596,6 +705,7 @@ def download_video_sync(url: str) -> str:
     # -----------------------------------------------------
 
     if video_id:
+
         cached_data = get_cached_metadata(
             video_id,
             "mp4",
@@ -658,14 +768,19 @@ def download_video_sync(url: str) -> str:
     # -----------------------------------------------------
 
     logger.info(
-        f"🎬 Starting video download: {url}"
+        f"🎬 Starting EXTREME video download: {url}"
     )
 
     opts = get_base_ydl_opts()
 
+    tracker = ProgressTracker()
+
     opts.update(
         {
-            # Quality unchanged: max 720p
+            # -------------------------------------------------
+            # MAX 720P — UNCHANGED
+            # -------------------------------------------------
+
             "format": (
                 f"bv*[height<={MAX_VIDEO_QUALITY}]"
                 f"[ext=mp4]+"
@@ -679,22 +794,37 @@ def download_video_sync(url: str) -> str:
             "writethumbnail": False,
             "embedthumbnail": False,
 
-            # Speed
-            "concurrent_fragment_downloads": 32,
-            "http_chunk_size": 52428800,
+            # -------------------------------------------------
+            # EXTREME SPEED
+            # -------------------------------------------------
 
-            "nocheckcertificate": True,
+            "concurrent_fragment_downloads":
+                CONCURRENT_FRAGMENTS,
+
+            "http_chunk_size":
+                HTTP_CHUNK_SIZE,
+
+            # -------------------------------------------------
+            # RETRIES
+            # -------------------------------------------------
+
+            "retries": 10,
+            "fragment_retries": 10,
+            "socket_timeout": SOCKET_TIMEOUT,
+
+            # -------------------------------------------------
+            # PROGRESS
+            # -------------------------------------------------
+
+            "progress_hooks": [
+                tracker.hook,
+            ],
 
             "noprogress": True,
-            "quiet": True,
-            "no_warnings": True,
 
-            "updatetime": False,
-            "clean_infojson": False,
-
-            "retries": 5,
-            "fragment_retries": 5,
-            "socket_timeout": 15,
+            # -------------------------------------------------
+            # FFMPEG
+            # -------------------------------------------------
 
             "postprocessor_args": [
                 "-threads",
@@ -704,11 +834,16 @@ def download_video_sync(url: str) -> str:
     )
 
     try:
+
         info = extract_youtube_with_fallback(
             url,
             opts,
             download=True,
         )
+
+        # -------------------------------------------------
+        # PREPARE OUTPUT
+        # -------------------------------------------------
 
         with yt_dlp.YoutubeDL(opts) as ydl:
             filename = ydl.prepare_filename(info)
@@ -717,12 +852,16 @@ def download_video_sync(url: str) -> str:
 
         final_path = f"{base_path}.mp4"
 
-        # Check possible output extensions
-        for ext in [
+        # -------------------------------------------------
+        # CHECK POSSIBLE OUTPUT EXTENSIONS
+        # -------------------------------------------------
+
+        for ext in (
             ".mp4",
             ".webm",
             ".mkv",
-        ]:
+        ):
+
             test_path = f"{base_path}{ext}"
 
             if (
@@ -762,6 +901,7 @@ def download_video_sync(url: str) -> str:
         return final_path
 
     except yt_dlp.utils.DownloadError as e:
+
         logger.error(
             f"❌ yt-dlp video error: {e}"
         )
@@ -771,6 +911,7 @@ def download_video_sync(url: str) -> str:
         )
 
     except Exception as e:
+
         logger.error(
             f"❌ Video download error: {e}",
             exc_info=True,
@@ -788,15 +929,24 @@ def download_video_sync(url: str) -> str:
 async def download_audio(
     url: str,
 ) -> Optional[str]:
-    """Async audio downloader."""
 
     try:
+
         return await asyncio.to_thread(
             download_audio_sync,
             url,
         )
 
+    except asyncio.CancelledError:
+
+        logger.warning(
+            "⚠️ Audio asyncio task cancelled."
+        )
+
+        raise
+
     except Exception as e:
+
         logger.error(
             f"❌ Async audio download failed: {e}",
             exc_info=True,
@@ -808,15 +958,24 @@ async def download_audio(
 async def download_video(
     url: str,
 ) -> Optional[str]:
-    """Async video downloader."""
 
     try:
+
         return await asyncio.to_thread(
             download_video_sync,
             url,
         )
 
+    except asyncio.CancelledError:
+
+        logger.warning(
+            "⚠️ Video asyncio task cancelled."
+        )
+
+        raise
+
     except Exception as e:
+
         logger.error(
             f"❌ Async video download failed: {e}",
             exc_info=True,
